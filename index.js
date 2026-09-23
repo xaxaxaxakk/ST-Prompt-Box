@@ -41,7 +41,6 @@ let observedParent;
 let bootObserver;
 let renderFrame = 0;
 let positionFrame = 0;
-let positionTimer = 0;
 let fullRenderPending = false;
 let renderedTree;
 let scrollResetPending = false;
@@ -1005,7 +1004,8 @@ function hideFolderEditor(restoreFocus = false) {
     closeMoveMenu();
     const editedId = folderEditId;
     folderEditId = null;
-    panel.querySelector("#prompt-box-folder-editor").hidden = true;
+    const editor = panel.querySelector("#prompt-box-folder-editor");
+    editor.hidden = true;
     panel.querySelector("#prompt-box-delete-confirm").hidden = true;
     delete panel.dataset.editorOpen;
     if (!restoreFocus) return;
@@ -1028,6 +1028,7 @@ function editFolder(id) {
     panel.querySelector("#prompt-box-delete-confirm").hidden = true;
     panel.querySelector("#prompt-box-folder-editor").hidden = false;
     panel.dataset.editorOpen = "true";
+    panel.querySelector("#prompt-box-folder-editor").scrollTop = 0;
     if (!isDesktop()) panel.querySelector("#prompt-box-parent-target").focus({preventScroll: true});
     else {
         input.focus({preventScroll: true});
@@ -1379,16 +1380,27 @@ function positionPanel() {
     const mobile = !isDesktop();
     if (panel.dataset.sheet !== String(mobile)) {
         panel.dataset.sheet = String(mobile);
+        if (mobile) {
+            for (const node of [panel, backdrop]) {
+                for (const property of ["left", "top", "width", "height", "max-height"]) node.style.removeProperty(property);
+            }
+            positionMoveMenu();
+        }
         scheduleRender();
     }
-    syncSidebar();
     const viewport = window.visualViewport;
+    backdrop.hidden = false;
+    panel.setAttribute("aria-modal", "true");
+    syncSidebar();
+    if (mobile) {
+        const bottom = (viewport?.height || window.innerHeight) + (viewport?.offsetTop || 0);
+        setPositionStyle(panel, "--prompt-box-available-height", `${Math.max(0, Math.floor(bottom - SHEET_GAP))}px`);
+        return;
+    }
     const left = viewport?.offsetLeft || 0;
     const top = viewport?.offsetTop || 0;
     const width = viewport?.width || window.innerWidth;
     const height = viewport?.height || window.innerHeight;
-    backdrop.hidden = false;
-    panel.setAttribute("aria-modal", "true");
     const bounds = backdrop.getBoundingClientRect();
     const origin = {
         left: bounds.left - (parseFloat(backdrop.style.left) || 0),
@@ -1398,34 +1410,18 @@ function positionPanel() {
     setPositionStyle(backdrop, "height", `${height}px`);
     setPositionStyle(backdrop, "left", `${left - origin.left}px`);
     setPositionStyle(backdrop, "top", `${top - origin.top}px`);
-    const panelWidth = mobile ? width : Math.min(1000, width - 32);
-    const panelHeight = Math.max(0, mobile ? height - SHEET_GAP : Math.min(720, height - 32));
+    const panelWidth = Math.min(1000, width - 32);
+    const panelHeight = Math.max(0, Math.min(720, height - 32));
     setPositionStyle(panel, "max-height", `${panelHeight}px`);
     setPositionStyle(panel, "height", `${panelHeight}px`);
     setPositionStyle(panel, "width", `${panelWidth}px`);
     setPositionStyle(panel, "left", `${left + (width - panelWidth) / 2 - origin.left}px`);
-    setPositionStyle(panel, "top", `${top + (mobile ? height - panelHeight : (height - panelHeight) / 2) - origin.top}px`);
+    setPositionStyle(panel, "top", `${top + (height - panelHeight) / 2 - origin.top}px`);
     positionMoveMenu();
 }
 
 function schedulePosition() {
-    if (!isOpen()) return;
-    clearTimeout(positionTimer);
-    positionTimer = 0;
-    if (!isDesktop()) {
-        if (positionFrame) cancelAnimationFrame(positionFrame);
-        positionFrame = 0;
-        positionTimer = setTimeout(() => {
-            positionTimer = 0;
-            queuePosition();
-        }, 120);
-        return;
-    }
-    queuePosition();
-}
-
-function queuePosition() {
-    if (positionFrame) return;
+    if (!isOpen() || positionFrame) return;
     positionFrame = requestAnimationFrame(() => {
         positionFrame = 0;
         positionPanel();
@@ -1469,8 +1465,6 @@ function handleEscape(event) {
 function openPanel() {
     mount();
     if (!panel) createPanel();
-    clearTimeout(positionTimer);
-    positionTimer = 0;
     panel.dataset.preparing = "true";
     panel.hidden = false;
     launcher.setAttribute("aria-expanded", "true");
@@ -1502,8 +1496,6 @@ function openPanel() {
 
 function closePanel(restoreFocus = true) {
     if (!panel) return;
-    clearTimeout(positionTimer);
-    positionTimer = 0;
     closeMoveMenu();
     cancelLongPress();
     endReorder();
