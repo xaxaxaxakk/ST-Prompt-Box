@@ -40,7 +40,7 @@
     color: var(--prompt-box-text) !important;
     box-shadow: 0 10px 25px rgb(0 0 0 / 12%) !important;
     font-family: "Pretendard" !important;
-    font-size: 14px !important;
+    font-size: 13px !important;
     line-height: 1.45 !important;
     text-align: left !important;
     text-shadow: none !important;
@@ -74,7 +74,7 @@
 
 #prompt-box :is(button, input, select) {
     font-family: inherit !important;
-    font-size: 14px !important;
+    font-size: 13px !important;
     color: var(--prompt-box-text) !important;
     text-shadow: none !important;
     box-shadow: none !important;
@@ -702,7 +702,7 @@
         font-size: 13px !important;
     }
     #prompt-box :is(.prompt-box-search input, #prompt-box-folder-name-input) {
-        font-size: 16px !important;
+        font-size: 13px !important;
     }
     #prompt-box #prompt-box-folder-tools {
         margin-left: auto !important;
