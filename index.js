@@ -1125,6 +1125,7 @@ function moveSheetDrag(event) {
         }
         sheetDrag.active = true;
         cancelLongPress();
+        delete panel.dataset.settling;
         panel.dataset.dragging = 'true';
     }
     event.preventDefault();
@@ -1142,6 +1143,7 @@ function endSheetDrag(event) {
     suppressClick = true;
     setTimeout(() => { suppressClick = false; }, 350);
     delete panel.dataset.dragging;
+    panel.dataset.settling = 'true';
     const velocity = drag.dy / Math.max(1, (event?.timeStamp || drag.time) - drag.time);
     if (drag.dy > Math.min(140, panel.offsetHeight * 0.25) || (velocity > 0.5 && drag.dy > 30)) {
         panel.style.setProperty('transform', `translateY(${panel.offsetHeight}px)`, 'important');
@@ -1335,6 +1337,8 @@ function openPanel() {
     mount();
     if (!panel) createPanel();
     clearTimeout(closeTimer);
+    panel.dataset.preparing = 'true';
+    delete panel.dataset.settling;
     panel.hidden = false;
     launcher.setAttribute('aria-expanded', 'true');
     panel.querySelector('#prompt-box-status').textContent = '';
@@ -1346,6 +1350,7 @@ function openPanel() {
     if (renderFrame) cancelAnimationFrame(renderFrame);
     renderFrame = 0;
     revealCurrent();
+    delete panel.dataset.preparing;
     if (isDesktop()) panel.querySelector('#prompt-box-search').focus({ preventScroll: true });
     else panel.querySelector('[data-action="close"]').focus({ preventScroll: true });
     document.addEventListener('pointerdown', handleOutside);
@@ -1370,6 +1375,8 @@ function closePanel(restoreFocus = true) {
     endReorder();
     endSheetDrag();
     panel.hidden = true;
+    delete panel.dataset.preparing;
+    delete panel.dataset.settling;
     panel.style.removeProperty('transform');
     delete panel.dataset.dragging;
     backdrop.hidden = true;

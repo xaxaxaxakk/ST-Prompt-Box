@@ -883,7 +883,7 @@
 }
 
 @keyframes prompt-box-sheet-in {
-    from { transform: translateY(100%); }
+    from { transform: translate3d(0, 100%, 0); }
     to { transform: none; }
 }
 
@@ -900,10 +900,16 @@
         border-top: 1px solid var(--prompt-box-border) !important;
         border-radius: 16px 16px 0 0 !important;
         box-shadow: 0 -8px 30px rgb(0 0 0 / 18%) !important;
-        transition: transform 0.18s ease !important;
+        transition: none !important;
     }
-    #prompt-box[data-sheet="true"]:not([hidden]) {
-        animation: prompt-box-sheet-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+    #prompt-box[data-sheet="true"]:not([hidden]):not([data-preparing="true"]) {
+        animation: prompt-box-sheet-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both !important;
+    }
+    #prompt-box[data-preparing="true"] {
+        visibility: hidden !important;
+    }
+    #prompt-box[data-sheet="true"][data-settling="true"] {
+        transition: transform 0.18s ease !important;
     }
     #prompt-box[data-dragging="true"] {
         transition: none !important;
