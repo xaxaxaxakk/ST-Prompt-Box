@@ -981,7 +981,7 @@ function openMoveMenu(kind = "move") {
             event.preventDefault();
             event.stopPropagation();
             rows[next].focus({preventScroll: true});
-            rows[next].scrollIntoView({block: "nearest"});
+            revealOption(rows[next]);
         }
     });
     panel.append(moveMenu);
@@ -990,7 +990,18 @@ function openMoveMenu(kind = "move") {
     positionMoveMenu();
     const selected = moveMenu.querySelector('[aria-selected="true"]') || moveMenu.querySelector('[role="option"]');
     selected?.focus({preventScroll: true});
-    selected?.scrollIntoView({block: "nearest"});
+    if (selected) revealOption(selected);
+}
+
+function revealOption(row) {
+    const top = row.offsetTop;
+    const bottom = top + row.offsetHeight;
+    if (top < moveMenu.scrollTop) moveMenu.scrollTop = top;
+    else if (bottom > moveMenu.scrollTop + moveMenu.clientHeight) moveMenu.scrollTop = bottom - moveMenu.clientHeight;
+}
+
+function preloadFont() {
+    document.fonts?.load('400 13px "Pretendard"').catch(() => {});
 }
 
 function hideFolderEditor(restoreFocus = false) {
@@ -1633,6 +1644,7 @@ function initialize() {
     if (initialized) return;
     initialized = true;
     settingsSnapshot = captureSettings();
+    preloadFont();
     const on = (type, callback) => {
         if (type) eventSource.on(type, callback);
     };
@@ -1640,7 +1652,10 @@ function initialize() {
         mount();
         scheduleRender();
     });
-    on(event_types.APP_READY, mount);
+    on(event_types.APP_READY, () => {
+        mount();
+        preloadFont();
+    });
     on(event_types.SETTINGS_UPDATED, handleSettingsUpdated);
     on(event_types.PRESET_RENAMED, ({apiId, oldName, newName}) => {
         if (apiId !== "openai") return;

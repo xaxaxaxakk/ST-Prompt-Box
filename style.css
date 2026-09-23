@@ -34,6 +34,7 @@
     height: min(720px, calc(100dvh - 32px)) !important;
     max-height: calc(100dvh - 32px) !important;
     overflow: hidden !important;
+    contain: layout paint !important;
     border: 1px solid var(--prompt-box-border) !important;
     border-radius: 18px !important;
     background: var(--prompt-box-bg) !important;
@@ -955,6 +956,10 @@
     from { opacity: 0; }
 }
 
+@keyframes prompt-box-pop-in {
+    from { opacity: 0; transform: translate3d(0, 12px, 0); }
+}
+
 @media (max-width: 600px) {
     #prompt-box-backdrop:not([hidden]) {
         animation: prompt-box-fade-in 0.2s ease-out !important;
@@ -968,6 +973,13 @@
     }
     #prompt-box[data-sheet="true"]:not([hidden]):not([data-preparing="true"]) {
         animation: prompt-box-sheet-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both !important;
+        backface-visibility: hidden !important;
+    }
+    #prompt-box :is(#prompt-box-folder-editor, #prompt-box-delete-dialog, .prompt-box-dropdown-menu):not([hidden]) {
+        animation: prompt-box-pop-in 0.16s ease-out !important;
+    }
+    #prompt-box[data-sheet="true"]:is([data-editor-open="true"], [data-dialog-open="true"], [data-menu-open="true"])::after {
+        animation: prompt-box-fade-in 0.16s ease-out !important;
     }
     #prompt-box[data-preparing="true"] {
         visibility: hidden !important;
@@ -1128,6 +1140,11 @@
         transform: none !important;
         border-radius: 16px !important;
     }
+    #prompt-box #prompt-box-folder-editor {
+        top: 16px !important;
+        bottom: auto !important;
+        max-height: calc(100% - 24px) !important;
+    }
     #prompt-box .prompt-box-editor-actions button {
         min-height: 42px !important;
         padding: 8px 14px !important;
@@ -1209,6 +1226,7 @@
 @media (prefers-reduced-motion: reduce) {
     #prompt-box,
     #prompt-box *,
+    #prompt-box::after,
     #prompt-box-backdrop {
         animation: none !important;
         transition: none !important;
