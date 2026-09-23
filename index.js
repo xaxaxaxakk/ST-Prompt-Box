@@ -7,6 +7,20 @@ const ALL = '__all__';
 const NONE = '__uncategorized__';
 const FAVORITES = '__favorites__';
 const PAGE_SIZE = 60;
+const LONG_PRESS_MS = 450;
+const SHEET_GAP = 24;
+const FOLDER_COLORS = [
+    ['#e05d5d', '빨강'],
+    ['#e8893c', '주황'],
+    ['#d4a82a', '노랑'],
+    ['#58a55c', '초록'],
+    ['#2f9e99', '청록'],
+    ['#4f86d9', '파랑'],
+    ['#8a68d4', '보라'],
+    ['#d45d9c', '분홍'],
+];
+const FAVORITE_COLOR = '#d4a82a';
+const COLOR_VALUES =new Set(FOLDER_COLORS.map(([value]) => value));
 const presetOrder = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const selectedNames = new Set();
 let nativeSyncPending = false;
@@ -15,6 +29,7 @@ let catalogDirty = true;
 let folderId = ALL;
 let limit = PAGE_SIZE;
 let organizing = false;
+let selectMode = false;
 let panel;
 let backdrop;
 let launcher;
@@ -25,13 +40,21 @@ let observedParent;
 let bootObserver;
 let renderFrame = 0;
 let loading = false;
+let loadingName = '';
 let folderEditId = null;
+let editColor = '';
 let initialized = false;
-let moveTarget = NONE;
 let moveMenu;
 let menuKind = 'move';
 let parentTarget = '';
-let sidebarOpen = false;
+let historyEntry = false;
+let longPress = null;
+let suppressClick = false;
+let lastPointerType = '';
+let reorder = null;
+let sheetDrag = null;
+let closeTimer = 0;
+let deleting = false;
 
 function getState() {
     let state = extension_settings[KEY];
@@ -41,12 +64,17 @@ function getState() {
     if (!Array.isArray(state.folders)) state.folders = [];
     if (!state.assignments || typeof state.assignments !== 'object' || Array.isArray(state.assignments)) state.assignments = {};
     if (!Array.isArray(state.favorites)) state.favorites = [];
+    if (!Array.isArray(state.collapsed)) state.collapsed = [];
     if (state.theme !== 'dark' && state.theme !== 'light') state.theme = 'light';
     return state;
 }
 
 function folders() {
     return getState().folders.filter(folder => folder && typeof folder.id === 'string' && typeof folder.name === 'string');
+}
+
+function colorOf(folder) {
+    return COLOR_VALUES.has(folder?.color) ? folder.color : '';
 }
 
 function folderTree() {
@@ -65,19 +93,31 @@ function folderTree() {
         children.get(resolved).push(folder);
     }
     const ordered = [];
+    const parts = new Map();
     const paths = new Map();
     const depths = new Map();
-    const visit = (parent, path, depth) => {
+    const roots = new Map();
+    const visit = (parent, path, depth, root) => {
         for (const folder of children.get(parent)) {
             const nextPath = [...path, folder.name];
             ordered.push(folder);
-            paths.set(folder.id, nextPath.join(' / '));
+            parts.set(folder.id, nextPath);
+            paths.set(folder.id, nextPath.join(' › '));
             depths.set(folder.id, depth);
-            visit(folder.id, nextPath, depth + 1);
+            roots.set(folder.id, root || folder.id);
+            visit(folder.id, nextPath, depth + 1, root || folder.id);
         }
     };
-    visit('', [], 0);
-    return { byId, parents, children, ordered, paths, depths };
+    visit('', [], 0, '');
+    return { byId, parents, children, ordered, parts, paths, depths, roots };
+}
+
+function folderColor(id, tree) {
+    return colorOf(tree.byId.get(tree.roots.get(id)));
+}
+
+function applyColor(node, color) {
+    if (color) node.style.setProperty('--prompt-box-folder', color, 'important');
 }
 
 function folderScope(id, tree = folderTree()) {
@@ -92,17 +132,12 @@ function folderScope(id, tree = folderTree()) {
     return ids;
 }
 
-function reorderFolder(id, offset) {
-    const tree = folderTree();
-    if (!tree.byId.has(id)) return;
-    const siblings = tree.children.get(tree.parents.get(id));
-    const position = siblings.findIndex(folder => folder.id === id);
-    const other = siblings[position + offset];
-    if (!other) return;
+function placeSiblings(ids) {
     const state = getState();
-    const index = state.folders.findIndex(folder => folder.id === id);
-    const target = state.folders.findIndex(folder => folder.id === other.id);
-    [state.folders[index], state.folders[target]] = [state.folders[target], state.folders[index]];
+    const members = new Set(ids);
+    const byId = new Map(state.folders.filter(folder => members.has(folder?.id)).map(folder => [folder.id, folder]));
+    const queue = ids.map(id => byId.get(id));
+    state.folders = state.folders.map(folder => members.has(folder?.id) ? queue.shift() : folder);
     saveState();
 }
 
@@ -129,14 +164,20 @@ function syncNativeGroups() {
     if (!presetSelect?.isConnected) return;
     const state = getState();
     const tree = folderTree();
-    const groups = new Map(tree.ordered.map(folder => [folder.id, { name: tree.paths.get(folder.id), options: [] }]));
-    groups.set(NONE, { name: '미분류', options: [] });
+    const favorites = new Set(state.favorites);
+    const favoriteGroup = { name: '★ 즐겨찾기', color: FAVORITE_COLOR, options: [] };
+    const groups = new Map(tree.ordered.map(folder => [folder.id, { name: tree.paths.get(folder.id), color: folderColor(folder.id, tree), options: [] }]));
+    groups.set(NONE, { name: '미분류', color: '', options: [] });
     for (const option of presetSelect.options) {
         const name = option.textContent.trim();
+        if (favorites.has(name)) {
+            favoriteGroup.options.push(option);
+            continue;
+        }
         const assigned = Object.hasOwn(state.assignments, name) ? state.assignments[name] : NONE;
         (groups.get(assigned) || groups.get(NONE)).options.push(option);
     }
-    const desired = Array.from(groups.values()).filter(group => group.options.length);
+    const desired = [favoriteGroup, ...groups.values()].filter(group => group.options.length);
     for (const group of desired) group.options.sort((a, b) => presetOrder.compare(a.textContent, b.textContent));
     const existing = Array.from(presetSelect.children);
     const sameStructure = existing.length === desired.length && desired.every((group, index) => {
@@ -165,6 +206,11 @@ function syncNativeGroups() {
             else presetSelect.selectedIndex = -1;
             catalogDirty = true;
         }
+        desired.forEach((group, index) => {
+            const node = presetSelect.children[index];
+            if (group.color) node.style.setProperty('color', group.color);
+            else node.style.removeProperty('color');
+        });
     } finally {
         observePresetSelect();
     }
@@ -176,6 +222,14 @@ function isOpen() {
 
 function isDesktop() {
     return window.matchMedia('(min-width: 601px)').matches;
+}
+
+function editorOpen() {
+    return !!panel && !panel.querySelector('#prompt-box-folder-editor').hidden;
+}
+
+function deleteDialogOpen() {
+    return !!panel && !panel.querySelector('#prompt-box-delete-dialog').hidden;
 }
 
 function currentName() {
@@ -221,6 +275,12 @@ function element(tag, className, text) {
     return node;
 }
 
+function glyph(icon) {
+    const node = element('i', `fa-solid ${icon}`);
+    node.setAttribute('aria-hidden', 'true');
+    return node;
+}
+
 function button(text, action, className = '') {
     const node = element('button', className, text);
     node.type = 'button';
@@ -230,9 +290,7 @@ function button(text, action, className = '') {
 
 function iconButton(icon, title, action) {
     const node = button('', action, 'prompt-box-icon');
-    const glyph = element('i', `fa-solid ${icon}`);
-    glyph.setAttribute('aria-hidden', 'true');
-    node.append(glyph);
+    node.append(glyph(icon));
     node.title = title;
     node.setAttribute('aria-label', title);
     return node;
@@ -243,6 +301,9 @@ function createPanel() {
     backdrop.id = 'prompt-box-backdrop';
     backdrop.hidden = true;
     backdrop.setAttribute('aria-hidden', 'true');
+    backdrop.addEventListener('click', () => {
+        if (!isDesktop()) closePanel(false);
+    });
     panel = element('section', '', undefined);
     panel.id = 'prompt-box';
     panel.hidden = true;
@@ -250,29 +311,64 @@ function createPanel() {
     panel.setAttribute('aria-labelledby', 'prompt-box-title');
     panel.innerHTML = `
         <header class="prompt-box-header">
-            <button type="button" data-action="sidebar" id="prompt-box-sidebar-toggle" class="prompt-box-icon" aria-label="폴더 메뉴 열기" aria-controls="prompt-box-sidebar" aria-expanded="false"><i class="fa-solid fa-bars" aria-hidden="true"></i></button>
+            <div class="prompt-box-grabber" aria-hidden="true"></div>
             <span class="prompt-box-mark"><i class="fa-solid fa-folder-open" aria-hidden="true"></i></span>
             <div class="prompt-box-heading"><strong id="prompt-box-title">프롬 정리함</strong><span id="prompt-box-current"></span></div>
             <button type="button" data-action="theme" id="prompt-box-theme" class="prompt-box-icon" aria-label="다크 모드로 전환"><i class="fa-solid fa-moon" aria-hidden="true"></i></button>
-            <button type="button" data-action="organize" id="prompt-box-organize" aria-pressed="false">정리</button>
+            <button type="button" data-action="organize" id="prompt-box-organize" class="prompt-box-icon" aria-pressed="false" aria-label="폴더 관리" title="폴더 관리"><i class="fa-solid fa-gear" aria-hidden="true"></i></button>
             <button type="button" data-action="close" class="prompt-box-icon" aria-label="프롬 정리함 닫기"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
         </header>
         <div class="prompt-box-search"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input id="prompt-box-search" type="search" autocomplete="off" placeholder="이 폴더에서 이름 검색" aria-label="프리셋 이름 검색"></div>
+        <nav id="prompt-box-chips" aria-label="프리셋 폴더"></nav>
         <div class="prompt-box-workspace">
-            <button type="button" data-action="close-sidebar" id="prompt-box-sidebar-shade" aria-label="폴더 메뉴 닫기" tabindex="-1" hidden></button>
-            <aside class="prompt-box-sidebar" id="prompt-box-sidebar"><div class="prompt-box-sidebar-header"><strong>폴더</strong><button type="button" data-action="close-sidebar" class="prompt-box-icon" aria-label="폴더 메뉴 접기"><i class="fa-solid fa-angles-left" aria-hidden="true"></i></button></div><nav id="prompt-box-folders" aria-label="프리셋 폴더"></nav><button type="button" data-action="new-folder" id="prompt-box-new-folder" aria-label="새 폴더 추가" title="새 폴더 추가"><i class="fa-solid fa-plus" aria-hidden="true"></i><span>새 폴더</span></button></aside>
+            <aside class="prompt-box-sidebar" id="prompt-box-sidebar">
+                <div class="prompt-box-sidebar-header"><div><strong>폴더 관리</strong><span>폴더를 누르면 이름·상위폴더·색상을 바꿀 수 있습니다. ⋮을 끌면 순서가 바뀝니다.</span></div><button type="button" data-action="organize" class="prompt-box-icon" aria-label="폴더 관리 끝내기" title="완료"><i class="fa-solid fa-check" aria-hidden="true"></i></button></div>
+                <nav id="prompt-box-folders" aria-label="프리셋 폴더"></nav>
+                <button type="button" data-action="new-folder" id="prompt-box-new-folder" hidden><i class="fa-solid fa-plus" aria-hidden="true"></i><span>새 폴더</span></button>
+            </aside>
             <main class="prompt-box-content">
-                <div class="prompt-box-list-header"><strong id="prompt-box-folder-name"></strong><span id="prompt-box-result-count"></span><div id="prompt-box-folder-tools" hidden></div></div>
-                <form id="prompt-box-folder-editor" hidden><label for="prompt-box-folder-name-input" id="prompt-box-editor-label">폴더 이름</label><div class="prompt-box-inline"><input id="prompt-box-folder-name-input" maxlength="80" required autocomplete="off"></div><label for="prompt-box-parent-target" class="prompt-box-parent-label">상위폴더</label><div class="prompt-box-dropdown"><button type="button" id="prompt-box-parent-target" class="prompt-box-dropdown-trigger" data-action="toggle-parent" aria-label="상위폴더" aria-haspopup="listbox" aria-controls="prompt-box-parent-menu" aria-expanded="false"><span>최상위</span><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></button></div><div class="prompt-box-inline"><button type="submit">저장</button><button type="button" data-action="cancel-folder">취소</button></div></form>
-                <div id="prompt-box-delete-confirm" hidden><span>이 폴더와 하위폴더를 삭제합니다. 안의 프리셋은 모두 미분류로 이동합니다.</span><div class="prompt-box-inline"><button type="button" data-action="confirm-delete" class="prompt-box-danger">폴더 삭제</button><button type="button" data-action="cancel-delete">취소</button></div></div>
+                <div class="prompt-box-list-header"><strong id="prompt-box-folder-name"></strong><span id="prompt-box-result-count"></span><button type="button" data-action="select" id="prompt-box-select" class="prompt-box-icon" title="여러 개 골라서 이동·삭제" aria-label="여러 개 골라서 이동·삭제"><i class="fa-solid fa-list-check" aria-hidden="true"></i></button></div>
                 <div id="prompt-box-list" aria-label="프리셋 목록"></div>
                 <button type="button" id="prompt-box-more" data-action="more" hidden>더 보기</button>
             </main>
         </div>
-        <div id="prompt-box-bulk" hidden><div class="prompt-box-bulk-selection"><span id="prompt-box-selected-count"></span><button type="button" data-action="select-results">검색 결과 선택</button><button type="button" data-action="clear-selection">선택 해제</button></div><div class="prompt-box-inline"><div class="prompt-box-dropdown"><button type="button" id="prompt-box-move-target" data-action="toggle-target" aria-label="이동할 폴더" aria-haspopup="listbox" aria-controls="prompt-box-move-menu" aria-expanded="false"><span></span><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></button></div><button type="button" data-action="move" id="prompt-box-move">이동</button></div></div>
-        <footer><span id="prompt-box-hint">이름을 누르면 불러옵니다.</span><span id="prompt-box-status" role="status" aria-live="polite"></span></footer>`;
-    const tools = panel.querySelector('#prompt-box-folder-tools');
-    tools.append(iconButton('fa-folder-plus', '하위폴더 추가', 'new-child'), iconButton('fa-pen', '폴더 이름·상위폴더 수정', 'rename-folder'), iconButton('fa-trash-can', '폴더 삭제', 'delete-folder'));
+        <form id="prompt-box-folder-editor" aria-labelledby="prompt-box-editor-label" hidden>
+            <strong id="prompt-box-editor-label">새 폴더</strong>
+            <label for="prompt-box-folder-name-input" class="prompt-box-field-label">폴더 이름</label>
+            <input id="prompt-box-folder-name-input" maxlength="80" required autocomplete="off">
+            <label for="prompt-box-parent-target" class="prompt-box-field-label">상위폴더</label>
+            <div class="prompt-box-dropdown"><button type="button" id="prompt-box-parent-target" data-action="toggle-parent" aria-label="상위폴더" aria-haspopup="listbox" aria-controls="prompt-box-parent-menu" aria-expanded="false"><span>최상위</span><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></button></div>
+            <div id="prompt-box-color-field"><span class="prompt-box-field-label" id="prompt-box-color-label">색상</span><div id="prompt-box-colors" role="radiogroup" aria-labelledby="prompt-box-color-label"></div></div>
+            <div class="prompt-box-editor-actions"><button type="button" data-action="delete-folder" id="prompt-box-delete-folder" class="prompt-box-danger">삭제</button><button type="button" data-action="cancel-folder">취소</button><button type="submit" class="prompt-box-primary">저장</button></div>
+            <div id="prompt-box-delete-confirm" hidden><span>이 폴더와 하위폴더를 삭제합니다. 안의 프리셋은 모두 미분류로 옮겨집니다.</span><div class="prompt-box-inline"><button type="button" data-action="confirm-delete" class="prompt-box-danger">폴더 삭제</button><button type="button" data-action="cancel-delete">취소</button></div></div>
+        </form>
+        <div id="prompt-box-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="prompt-box-delete-title" aria-describedby="prompt-box-delete-message" hidden>
+            <strong id="prompt-box-delete-title">정말 삭제하겠습니까?</strong>
+            <p id="prompt-box-delete-message"></p>
+            <ul id="prompt-box-delete-names"></ul>
+            <p id="prompt-box-delete-note" hidden></p>
+            <div class="prompt-box-editor-actions"><button type="button" data-action="cancel-delete-presets">취소</button><button type="button" data-action="confirm-delete-presets" id="prompt-box-confirm-delete-presets" class="prompt-box-danger-primary">삭제</button></div>
+        </div>
+        <div id="prompt-box-bulk" hidden><span id="prompt-box-selected-count"></span><button type="button" data-action="select-results"><i class="fa-solid fa-check-double"></i></button><button type="button" data-action="clear-selection"><i class="fa-solid fa-stop"></i></button><button type="button" data-action="delete-presets" id="prompt-box-delete-presets" class="prompt-box-danger"><i class="fa-solid fa-trash-can" aria-hidden="true"></i></button><button type="button" data-action="toggle-target" id="prompt-box-move" class="prompt-box-primary" aria-haspopup="listbox" aria-controls="prompt-box-move-menu" aria-expanded="false"><i class="fa-solid fa-truck-moving"></i></button></div>
+        <footer><span id="prompt-box-hint"></span><span id="prompt-box-status" role="status" aria-live="polite"></span></footer>`;
+    const swatches = panel.querySelector('#prompt-box-colors');
+    for (const [value, name] of [['', '없음'], ...FOLDER_COLORS]) {
+        const swatch = button('', 'choose-color', 'prompt-box-swatch');
+        swatch.dataset.color = value;
+        swatch.setAttribute('role', 'radio');
+        swatch.title = name;
+        swatch.setAttribute('aria-label', name);
+        if (value) applyColor(swatch, value);
+        else swatch.append(glyph('fa-ban'));
+        swatches.append(swatch);
+    }
+    panel.addEventListener('pointerdown', () => { suppressClick = false; }, true);
+    panel.addEventListener('click', event => {
+        if (!suppressClick) return;
+        suppressClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+    }, true);
     panel.addEventListener('click', handleClick);
     panel.addEventListener('change', event => {
         const name = event.target.dataset.selectName;
@@ -287,21 +383,20 @@ function createPanel() {
     });
     panel.querySelector('#prompt-box-folder-editor').addEventListener('submit', saveFolder);
     panel.querySelector('#prompt-box-folder-name-input').addEventListener('input', event => event.target.setCustomValidity(''));
-    panel.querySelector('#prompt-box-move-target').addEventListener('keydown', event => {
-        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-        event.preventDefault();
-        event.stopPropagation();
-        openMoveMenu();
-    });
     panel.querySelector('#prompt-box-parent-target').addEventListener('keydown', event => {
         if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
         event.preventDefault();
         event.stopPropagation();
         openMoveMenu('parent');
     });
-    panel.querySelector('.prompt-box-content').addEventListener('scroll', () => {
-        if (moveMenu && menuKind === 'parent') closeMoveMenu();
-    }, { passive: true });
+    panel.querySelector('.prompt-box-content').addEventListener('scroll', cancelLongPress, { passive: true });
+    const list = panel.querySelector('#prompt-box-list');
+    list.addEventListener('pointerdown', startLongPress);
+    list.addEventListener('contextmenu', event => {
+        if (lastPointerType === 'touch' && event.target.closest('.prompt-box-row')) event.preventDefault();
+    });
+    panel.querySelector('#prompt-box-folders').addEventListener('pointerdown', startReorder);
+    panel.addEventListener('touchstart', startSheetDrag, { passive: true });
     panel.addEventListener('keydown', event => {
         if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
         const controls = Array.from(panel.querySelectorAll('#prompt-box-list .prompt-box-load, #prompt-box-list input[type="checkbox"]'));
@@ -335,13 +430,14 @@ function render() {
     const state = getState();
     applyTheme();
     const tree = folderTree();
-    const folderList = tree.ordered;
-    if (![ALL, NONE, FAVORITES].includes(folderId) && !folderList.some(folder => folder.id === folderId)) folderId = ALL;
+    if (![ALL, NONE, FAVORITES].includes(folderId) && !tree.byId.has(folderId)) folderId = ALL;
+    panel.dataset.organizing = String(organizing);
+    panel.dataset.selecting = String(selectMode);
     const active = currentName();
     const current = panel.querySelector('#prompt-box-current');
-    current.textContent = active ? `사용 중 · ${active}` : '프리셋을 골라 불러오세요';
+    current.textContent = active ? `사용 중 · ${active}` : '선택된 프리셋이 없습니다';
     current.title = active;
-    const counts = new Map(folderList.map(folder => [folder.id, 0]));
+    const counts = new Map(tree.ordered.map(folder => [folder.id, 0]));
     const favoriteNames = new Set(state.favorites);
     let uncategorized = 0;
     let favoriteCount = 0;
@@ -351,66 +447,151 @@ function render() {
         else uncategorized++;
         if (favoriteNames.has(item.name)) favoriteCount++;
     }
-    for (const folder of [...folderList].reverse()) {
+    for (const folder of [...tree.ordered].reverse()) {
         const parent = tree.parents.get(folder.id);
         if (parent) counts.set(parent, counts.get(parent) + counts.get(folder.id));
     }
     const views = [
-        { id: ALL, name: '전체', count: catalog.length },
-        { id: FAVORITES, name: '즐겨찾기', count: favoriteCount },
-        { id: NONE, name: '미분류', count: uncategorized },
-        ...folderList.map(folder => ({ ...folder, count: counts.get(folder.id) })),
+        { id: ALL, name: '전체', count: catalog.length, icon: 'fa-layer-group' },
+        { id: FAVORITES, name: '즐겨찾기', count: favoriteCount, icon: 'fa-star' },
+        { id: NONE, name: '미분류', count: uncategorized, icon: 'fa-inbox' },
     ];
-    const navigation = document.createDocumentFragment();
-    for (const view of views) {
-        const row = element('div', 'prompt-box-folder-row');
-        row.dataset.folderRow = view.id;
-        const depth = tree.depths.get(view.id) || 0;
-        row.style.setProperty('--prompt-box-indent', `${Math.min(depth, 5) * 12}px`, 'important');
-        row.classList.toggle('prompt-box-subfolder', depth > 0);
-        row.classList.toggle('prompt-box-folder-root', tree.byId.has(view.id) && depth === 0);
-        const item = button('', 'folder', 'prompt-box-folder');
-        item.dataset.folderId = view.id;
-        item.setAttribute('aria-current', String(view.id === folderId));
-        item.title = tree.paths.get(view.id) || view.name;
-        item.setAttribute('aria-label', item.title);
-        if (depth > 0) {
-            const branch = element('i', 'fa-solid fa-arrow-turn-up prompt-box-branch');
-            branch.setAttribute('aria-hidden', 'true');
-            item.append(branch);
-        }
-        item.append(element('span', 'prompt-box-folder-label', view.name));
-        row.append(item);
-        if (organizing && tree.byId.has(view.id)) {
-            const siblings = tree.children.get(tree.parents.get(view.id));
-            const index = siblings.findIndex(folder => folder.id === view.id);
-            const actions = element('div', 'prompt-box-folder-order');
-            const up = iconButton('fa-angle-up', `${view.name} 위로 이동`, 'folder-up');
-            const down = iconButton('fa-angle-down', `${view.name} 아래로 이동`, 'folder-down');
-            up.dataset.folderId = down.dataset.folderId = view.id;
-            up.disabled = index === 0;
-            down.disabled = index === siblings.length - 1;
-            actions.append(up, down);
-            row.append(actions);
-        } else row.append(element('span', 'prompt-box-count', String(view.count)));
-        navigation.append(row);
-    }
-    panel.querySelector('#prompt-box-folders').replaceChildren(navigation);
+    renderFolders(tree, views, counts);
+    const chips = panel.querySelector('#prompt-box-chips');
+    if (!isDesktop() && !organizing) renderChips(tree, views, counts);
+    else if (chips.firstChild) chips.replaceChildren();
     if (focusedFolder !== undefined) {
-        const replacement = Array.from(panel.querySelectorAll('#prompt-box-folders [data-action]')).find(node => node.dataset.folderId === focusedFolder && node.dataset.action === focusedAction && !node.disabled);
-        (replacement || Array.from(panel.querySelectorAll('.prompt-box-folder')).find(node => node.dataset.folderId === focusedFolder))?.focus({ preventScroll: true });
+        Array.from(panel.querySelectorAll('#prompt-box-folders [data-action], #prompt-box-chips [data-action]'))
+            .find(node => node.dataset.folderId === focusedFolder && node.dataset.action === focusedAction)?.focus({ preventScroll: true });
     }
     panel.querySelector('#prompt-box-folder-name').textContent = tree.paths.get(folderId) || views.find(view => view.id === folderId)?.name || '전체';
-    panel.querySelector('#prompt-box-organize').textContent = organizing ? '완료' : '정리';
-    panel.querySelector('#prompt-box-organize').setAttribute('aria-pressed', String(organizing));
-    panel.querySelector('#prompt-box-bulk').hidden = !organizing;
-    const folderIndex = folderList.findIndex(folder => folder.id === folderId);
-    panel.querySelector('#prompt-box-folder-tools').hidden = !organizing || folderIndex < 0;
-    panel.querySelector('#prompt-box-hint').textContent = organizing ? '분류를 바꿔도 현재 프리셋은 유지됩니다.' : '이름을 누르면 불러옵니다.';
+    const organize = panel.querySelector('#prompt-box-organize');
+    organize.setAttribute('aria-pressed', String(organizing));
+    organize.title = organizing ? '폴더 관리 끝내기' : '폴더 관리';
+    organize.setAttribute('aria-label', organize.title);
+    panel.querySelector('#prompt-box-new-folder').hidden = !organizing;
+    panel.querySelector('#prompt-box-bulk').hidden = !selectMode;
+    panel.querySelector('#prompt-box-select').hidden = selectMode || organizing;
+    panel.querySelector('#prompt-box-hint').textContent = organizing ? '폴더를 클릭하면 이름, 색상 등을 변경할 수 있습니다. ⋮ 를 잡고 움직여 순서를 바꾸세요.'
+        : selectMode ? '프리셋을 골라 다른 폴더로 옮기거나 삭제할 수 있습니다.'
+            : '이름을 누르면 불러오고, 길게 누르면 여러 개를 골라 옮기거나 삭제할 수 있습니다.';
     renderRows(active, favoriteNames, tree);
-    syncMoveTarget(tree);
     syncSidebar();
     renderBulk();
+}
+
+function folderRow(view, tree) {
+    const row = element('div', 'prompt-box-folder-row');
+    row.dataset.folderRow = view.id;
+    const isFolder = tree.byId.has(view.id);
+    if (isFolder) {
+        if (tree.children.get(view.id).length) {
+            const expanded = !getState().collapsed.includes(view.id);
+            const toggle = iconButton(expanded ? 'fa-chevron-down' : 'fa-chevron-right', `${view.name} ${expanded ? '접기' : '펼치기'}`, 'collapse');
+            toggle.classList.add('prompt-box-collapse');
+            toggle.dataset.folderId = view.id;
+            toggle.setAttribute('aria-expanded', String(expanded));
+            row.append(toggle);
+        } else row.append(element('span', 'prompt-box-collapse'));
+    }
+    const item = button('', 'folder', 'prompt-box-folder');
+    item.dataset.folderId = view.id;
+    item.setAttribute('aria-current', String(!organizing && view.id === folderId));
+    item.title = tree.paths.get(view.id) || view.name;
+    item.setAttribute('aria-label', organizing && isFolder ? `${item.title} 편집` : item.title);
+    if (view.icon) item.append(glyph(view.icon));
+    item.append(element('span', 'prompt-box-folder-label', view.name));
+    row.append(item);
+    const draggable = organizing && isFolder && tree.children.get(tree.parents.get(view.id)).length > 1;
+    if (draggable) {
+        const handle = element('span', 'prompt-box-drag');
+        handle.title = '끌어서 순서 변경';
+        handle.append(glyph('fa-ellipsis-vertical'));
+        row.append(handle);
+    }
+    if (!organizing) item.append(element('span', 'prompt-box-count', String(view.count)));
+    return row;
+}
+
+function folderNode(folder, tree, counts) {
+    const node = element('div', 'prompt-box-node');
+    node.dataset.nodeId = folder.id;
+    node.append(folderRow({ id: folder.id, name: folder.name, count: counts.get(folder.id) }, tree));
+    const kids = tree.children.get(folder.id);
+    if (kids.length && !getState().collapsed.includes(folder.id)) {
+        const list = element('div', 'prompt-box-children');
+        for (const child of kids) list.append(folderNode(child, tree, counts));
+        node.append(list);
+    }
+    return node;
+}
+
+function renderFolders(tree, views, counts) {
+    const sections = [];
+    if (!organizing) {
+        const fixed = element('div', 'prompt-box-views');
+        for (const view of views) fixed.append(folderRow(view, tree));
+        sections.push(fixed);
+    }
+    const groups = element('div', 'prompt-box-groups');
+    const currentRoot = tree.roots.get(folderId);
+    for (const root of tree.children.get('')) {
+        const node = folderNode(root, tree, counts);
+        node.classList.add('prompt-box-group');
+        node.classList.toggle('prompt-box-group-current', !organizing && currentRoot === root.id);
+        applyColor(node, colorOf(root));
+        groups.append(node);
+    }
+    if (organizing && !tree.ordered.length) groups.append(element('div', 'prompt-box-empty', '아직 폴더가 없습니다. 아래 새 폴더 버튼으로 만들 수 있습니다.'));
+    sections.push(groups);
+    panel.querySelector('#prompt-box-folders').replaceChildren(...sections);
+}
+
+function chip(view, options = {}) {
+    const node = button('', 'folder', 'prompt-box-chip');
+    node.dataset.folderId = view.id;
+    node.setAttribute('aria-current', String(view.id === folderId));
+    node.classList.toggle('prompt-box-chip-active', view.id === folderId || !!options.contains);
+    node.title = options.title || view.name;
+    if (options.color) {
+        node.classList.add('prompt-box-chip-colored');
+        applyColor(node, options.color);
+    }
+    if (view.icon) node.append(glyph(view.icon));
+    node.append(element('span', 'prompt-box-chip-label', view.name), element('span', 'prompt-box-count', String(view.count)));
+    return node;
+}
+
+function renderChips(tree, views, counts) {
+    const box = panel.querySelector('#prompt-box-chips');
+    const previous = new Map(Array.from(box.children, row => [row.dataset.key, row.scrollLeft]));
+    const currentRoot = tree.roots.get(folderId);
+    const top = element('div', 'prompt-box-chip-row');
+    top.dataset.key = 'top';
+    for (const view of views) top.append(chip(view));
+    for (const root of tree.children.get('')) {
+        top.append(chip({ id: root.id, name: root.name, count: counts.get(root.id) }, { color: colorOf(root), contains: currentRoot === root.id }));
+    }
+    const rows = [top];
+    if (currentRoot && tree.children.get(currentRoot).length) {
+        const sub = element('div', 'prompt-box-chip-row prompt-box-chip-sub');
+        sub.dataset.key = `sub:${currentRoot}`;
+        const color = colorOf(tree.byId.get(currentRoot));
+        sub.append(chip({ id: currentRoot, name: '모두', count: counts.get(currentRoot) }, { color, title: `${tree.paths.get(currentRoot)} 전체` }));
+        for (const folder of tree.ordered) {
+            if (folder.id === currentRoot || tree.roots.get(folder.id) !== currentRoot) continue;
+            sub.append(chip({ id: folder.id, name: tree.parts.get(folder.id).slice(1).join(' › '), count: counts.get(folder.id) }, { color, title: tree.paths.get(folder.id) }));
+        }
+        rows.push(sub);
+    }
+    box.replaceChildren(...rows);
+    for (const row of rows) {
+        if (previous.has(row.dataset.key)) row.scrollLeft = previous.get(row.dataset.key);
+        const active = row.querySelector('.prompt-box-chip-active');
+        if (!active) continue;
+        if (active.offsetLeft < row.scrollLeft) row.scrollLeft = active.offsetLeft - 12;
+        else if (active.offsetLeft + active.offsetWidth > row.scrollLeft + row.clientWidth) row.scrollLeft = active.offsetLeft + active.offsetWidth - row.clientWidth + 12;
+    }
 }
 
 function applyTheme() {
@@ -433,12 +614,11 @@ function renderRows(active, favoriteNames, tree) {
     const list = panel.querySelector('#prompt-box-list');
     const fragment = document.createDocumentFragment();
     const state = getState();
-    const folderNames = tree.paths;
     for (const item of shown) {
         const row = element('div', 'prompt-box-row');
         row.classList.toggle('prompt-box-current-row', item.name === active);
         let entry;
-        if (organizing) {
+        if (selectMode) {
             entry = element('label', 'prompt-box-choice');
             const checkbox = element('input');
             checkbox.type = 'checkbox';
@@ -454,11 +634,22 @@ function renderRows(active, favoriteNames, tree) {
         const copy = element('span', 'prompt-box-row-copy');
         const title = element('span', 'prompt-box-row-name', item.name);
         title.title = item.name;
+        const meta = element('span', 'prompt-box-row-meta');
         const assigned = Object.hasOwn(state.assignments, item.name) ? state.assignments[item.name] : null;
-        const details = [folderNames.get(assigned) || '미분류'];
-        if (item.name === active) details.push('사용 중');
-        copy.append(title, element('span', 'prompt-box-row-meta', details.join(' · ')));
+        if (tree.byId.has(assigned)) {
+            const parts = tree.parts.get(assigned);
+            applyColor(meta, folderColor(assigned, tree));
+            meta.append(element('span', 'prompt-box-path-root', parts[0]));
+            if (parts.length > 1) meta.append(` › ${parts.slice(1).join(' › ')}`);
+        } else meta.append('미분류');
+        if (item.name === active) meta.append(' · 사용 중');
+        copy.append(title, meta);
         entry.append(copy);
+        if (loading && item.name === loadingName) {
+            row.classList.add('prompt-box-loading-row');
+            entry.setAttribute('aria-busy', 'true');
+            entry.append(glyph('fa-spinner fa-spin-pulse prompt-box-spinner'));
+        }
         const favorite = iconButton('fa-star', favoriteNames.has(item.name) ? '즐겨찾기 해제' : '즐겨찾기 추가', 'favorite');
         favorite.dataset.favoriteName = item.name;
         favorite.setAttribute('aria-label', `${item.name} ${favorite.title}`);
@@ -466,7 +657,7 @@ function renderRows(active, favoriteNames, tree) {
         row.append(entry, favorite);
         fragment.append(row);
     }
-    if (!matching.length) fragment.append(element('div', 'prompt-box-empty', panel.querySelector('#prompt-box-search').value ? '검색 결과가 없습니다. 폴더를 바꾸거나 다른 이름으로 검색해 보세요.' : folderId === FAVORITES ? '별을 눌러 자주 쓰는 프리셋을 모아보세요.' : '이 폴더에는 프리셋이 없습니다. 정리에서 프리셋을 옮길 수 있어요.'));
+    if (!matching.length) fragment.append(element('div', 'prompt-box-empty', panel.querySelector('#prompt-box-search').value ? '검색 결과가 없습니다. 다른 폴더나 다른 이름으로 검색해 보세요.' : folderId === FAVORITES ? '별을 누르면 자주 쓰는 프리셋을 여기에 모을 수 있습니다.' : '이 폴더에는 프리셋이 없습니다. 프리셋을 길게 눌러 이 폴더로 옮길 수 있습니다.'));
     list.replaceChildren(fragment);
     panel.querySelector('#prompt-box-result-count').textContent = `${matching.length}개`;
     const more = panel.querySelector('#prompt-box-more');
@@ -478,16 +669,83 @@ function renderRows(active, favoriteNames, tree) {
 function renderBulk() {
     panel.querySelector('#prompt-box-selected-count').textContent = `${selectedNames.size}개 선택`;
     panel.querySelector('#prompt-box-move').disabled = !selectedNames.size;
-    panel.querySelector('[data-action="clear-selection"]').disabled = !selectedNames.size;
+    panel.querySelector('#prompt-box-delete-presets').disabled = !selectedNames.size;
 }
 
-function syncMoveTarget(tree = folderTree()) {
-    const name = tree.paths.get(moveTarget);
-    if (!name) moveTarget = NONE;
-    const trigger = panel.querySelector('#prompt-box-move-target');
-    trigger.firstElementChild.textContent = name || '미분류';
-    trigger.setAttribute('aria-label', `이동할 폴더: ${name || '미분류'}`);
-    trigger.title = name || '미분류';
+function deletionTargets() {
+    const active = currentName();
+    const names = getCatalog().map(item => item.name).filter(name => selectedNames.has(name));
+    return { names: names.filter(name => name !== active), skipped: names.includes(active) ? active : '' };
+}
+
+function openDeleteDialog() {
+    if (!selectedNames.size) return;
+    closeMoveMenu();
+    const { names, skipped } = deletionTargets();
+    const dialog = panel.querySelector('#prompt-box-delete-dialog');
+    dialog.querySelector('#prompt-box-delete-message').textContent = names.length
+        ? `선택한 프리셋 ${names.length}개를 실리태번에서 완전히 삭제합니다. 삭제한 프리셋은 되돌릴 수 없습니다.`
+        : '사용 중인 프리셋은 삭제할 수 없습니다. 다른 프리셋을 불러온 뒤 삭제할 수 있습니다.';
+    const list = dialog.querySelector('#prompt-box-delete-names');
+    const shown = names.slice(0, 8).map(name => element('li', '', name));
+    if (names.length > shown.length) shown.push(element('li', 'prompt-box-delete-more', `외 ${names.length - shown.length}개`));
+    list.replaceChildren(...shown);
+    list.hidden = !names.length;
+    const note = dialog.querySelector('#prompt-box-delete-note');
+    note.hidden = !skipped || !names.length;
+    note.textContent = skipped ? `사용 중인 프리셋(${skipped})은 삭제 목록에서 제외했습니다.` : '';
+    const confirm = dialog.querySelector('#prompt-box-confirm-delete-presets');
+    confirm.hidden = !names.length;
+    confirm.textContent = `${names.length}개 삭제`;
+    dialog.hidden = false;
+    panel.dataset.dialogOpen = 'true';
+    dialog.querySelector('[data-action="cancel-delete-presets"]').focus({ preventScroll: true });
+}
+
+function hideDeleteDialog(restoreFocus = false) {
+    if (!panel) return;
+    panel.querySelector('#prompt-box-delete-dialog').hidden = true;
+    delete panel.dataset.dialogOpen;
+    if (restoreFocus) panel.querySelector('#prompt-box-delete-presets').focus({ preventScroll: true });
+}
+
+async function deleteSelectedPresets() {
+    if (deleting) return;
+    const { names } = deletionTargets();
+    if (!names.length) return;
+    const manager = getPresetManager('openai');
+    const dialog = panel.querySelector('#prompt-box-delete-dialog');
+    const confirm = dialog.querySelector('#prompt-box-confirm-delete-presets');
+    const buttons = Array.from(dialog.querySelectorAll('button'));
+    if (!manager) {
+        dialog.querySelector('#prompt-box-delete-message').textContent = '프리셋을 삭제할 준비가 되지 않았습니다.';
+        return;
+    }
+    deleting = true;
+    buttons.forEach(node => { node.disabled = true; });
+    let removed = 0;
+    const failed = [];
+    for (const [index, name] of names.entries()) {
+        confirm.textContent = `삭제 중… ${index + 1}/${names.length}`;
+        try {
+            if (await manager.deletePreset(name)) {
+                removed++;
+                selectedNames.delete(name);
+                await eventSource.emit(event_types.PRESET_DELETED, { apiId: 'openai', name });
+            } else failed.push(name);
+        } catch (error) {
+            console.error('[prompt-box] Failed to delete preset', name, error);
+            failed.push(name);
+        }
+    }
+    saveSettingsDebounced();
+    deleting = false;
+    buttons.forEach(node => { node.disabled = false; });
+    hideDeleteDialog();
+    selectMode = false;
+    selectedNames.clear();
+    panel.querySelector('#prompt-box-status').textContent = failed.length ? `${removed}개 삭제했습니다. ${failed.length}개는 삭제하지 못했습니다.` : `${removed}개 삭제했습니다.`;
+    scheduleRender();
 }
 
 function syncParentTarget(tree = folderTree()) {
@@ -497,16 +755,25 @@ function syncParentTarget(tree = folderTree()) {
     trigger.firstElementChild.textContent = name;
     trigger.setAttribute('aria-label', `상위폴더: ${name}`);
     trigger.title = name;
+    syncColorField();
+}
+
+function syncColorField() {
+    panel.querySelector('#prompt-box-color-field').hidden = !!parentTarget;
+    for (const swatch of panel.querySelectorAll('.prompt-box-swatch')) {
+        swatch.setAttribute('aria-checked', String(swatch.dataset.color === editColor));
+    }
 }
 
 function menuTrigger() {
-    return panel.querySelector(menuKind === 'parent' ? '#prompt-box-parent-target' : '#prompt-box-move-target');
+    return panel.querySelector(menuKind === 'parent' ? '#prompt-box-parent-target' : '#prompt-box-move');
 }
 
 function closeMoveMenu(restoreFocus = false) {
     if (!moveMenu) return;
     moveMenu.remove();
     moveMenu = null;
+    delete panel.dataset.menuOpen;
     const trigger = menuTrigger();
     trigger.setAttribute('aria-expanded', 'false');
     if (restoreFocus) trigger.focus({ preventScroll: true });
@@ -514,45 +781,52 @@ function closeMoveMenu(restoreFocus = false) {
 
 function positionMoveMenu() {
     if (!moveMenu) return;
+    if (!isDesktop()) {
+        moveMenu.style.cssText = '';
+        return;
+    }
     const trigger = menuTrigger().getBoundingClientRect();
     const bounds = panel.getBoundingClientRect();
+    const width = Math.max(trigger.width, 240);
     const above = trigger.top - bounds.top - 12;
     const below = bounds.bottom - trigger.bottom - 12;
     const placeAbove = above > below;
     moveMenu.style.setProperty('max-height', `${Math.max(0, Math.min(260, placeAbove ? above : below))}px`, 'important');
-    moveMenu.style.setProperty('width', `${trigger.width}px`, 'important');
-    moveMenu.style.setProperty('left', `${trigger.left - bounds.left - panel.clientLeft}px`, 'important');
+    moveMenu.style.setProperty('width', `${width}px`, 'important');
+    moveMenu.style.setProperty('left', `${Math.min(trigger.left - bounds.left, bounds.width - width - 12) - panel.clientLeft}px`, 'important');
     moveMenu.style.setProperty('top', `${(placeAbove ? trigger.top - moveMenu.offsetHeight - 6 : trigger.bottom + 6) - bounds.top - panel.clientTop}px`, 'important');
 }
 
 function openMoveMenu(kind = 'move') {
-    if (moveMenu || !organizing) return;
+    if (moveMenu) return;
+    if (kind === 'move' && !selectedNames.size) return;
     menuKind = kind;
     const tree = folderTree();
     if (kind === 'parent') syncParentTarget(tree);
-    else syncMoveTarget(tree);
     const trigger = menuTrigger();
     moveMenu = element('div', 'prompt-box-dropdown-menu');
     moveMenu.id = kind === 'parent' ? 'prompt-box-parent-menu' : 'prompt-box-move-menu';
     moveMenu.setAttribute('role', 'listbox');
-    moveMenu.setAttribute('aria-label', kind === 'parent' ? '상위폴더' : '이동할 폴더');
+    const label = kind === 'parent' ? '상위폴더' : `${selectedNames.size}개를 옮길 폴더`;
+    moveMenu.setAttribute('aria-label', label);
+    moveMenu.append(element('div', 'prompt-box-menu-title', label));
     const excluded = kind === 'parent' ? folderScope(folderEditId, tree) : new Set();
-    const options = [kind === 'parent' ? { id: '', name: '최상위' } : { id: NONE, name: '미분류' },
-        ...tree.ordered.filter(folder => !excluded.has(folder.id)).map(folder => ({ id: folder.id, name: tree.paths.get(folder.id) }))];
+    const options = [kind === 'parent' ? { id: '', name: '최상위', depth: 0 } : { id: NONE, name: '미분류', depth: 0 },
+        ...tree.ordered.filter(folder => !excluded.has(folder.id)).map(folder => ({ id: folder.id, name: folder.name, depth: tree.depths.get(folder.id) + 1 }))];
     for (const option of options) {
         const row = button('', kind === 'parent' ? 'choose-parent' : 'choose-target', 'prompt-box-dropdown-option');
         row.dataset.targetId = option.id;
+        row.dataset.depth = String(Math.min(option.depth, 4));
         row.setAttribute('role', 'option');
-        row.setAttribute('aria-selected', String(option.id === (kind === 'parent' ? parentTarget : moveTarget)));
+        row.setAttribute('aria-selected', String(kind === 'parent' && option.id === parentTarget));
         row.tabIndex = -1;
-        row.title = option.name;
-        const check = element('i', 'fa-solid fa-check');
-        check.setAttribute('aria-hidden', 'true');
-        row.append(element('span', '', option.name), check);
+        row.title = tree.paths.get(option.id) || option.name;
+        if (tree.byId.has(option.id)) applyColor(row, folderColor(option.id, tree));
+        row.append(element('span', '', option.name), glyph('fa-check'));
         moveMenu.append(row);
     }
     moveMenu.addEventListener('keydown', event => {
-        const rows = Array.from(moveMenu.children);
+        const rows = Array.from(moveMenu.querySelectorAll('[role="option"]'));
         const index = rows.indexOf(document.activeElement);
         let next;
         if (event.key === 'ArrowDown') next = (index + 1) % rows.length;
@@ -568,34 +842,46 @@ function openMoveMenu(kind = 'move') {
         }
     });
     panel.append(moveMenu);
+    panel.dataset.menuOpen = 'true';
     trigger.setAttribute('aria-expanded', 'true');
     positionMoveMenu();
-    const selected = moveMenu.querySelector('[aria-selected="true"]');
+    const selected = moveMenu.querySelector('[aria-selected="true"]') || moveMenu.querySelector('[role="option"]');
     selected?.focus({ preventScroll: true });
     selected?.scrollIntoView({ block: 'nearest' });
 }
 
-function hideFolderEditor() {
+function hideFolderEditor(restoreFocus = false) {
     closeMoveMenu();
+    const editedId = folderEditId;
     folderEditId = null;
     panel.querySelector('#prompt-box-folder-editor').hidden = true;
     panel.querySelector('#prompt-box-delete-confirm').hidden = true;
+    delete panel.dataset.editorOpen;
+    if (!restoreFocus) return;
+    const row = editedId && Array.from(panel.querySelectorAll('#prompt-box-folders .prompt-box-folder')).find(node => node.dataset.folderId === editedId);
+    (row || panel.querySelector(organizing ? '#prompt-box-new-folder' : '#prompt-box-organize'))?.focus({ preventScroll: true });
 }
 
-function editFolder(id, parent = '') {
-    hideFolderEditor();
+function editFolder(id) {
+    closeMoveMenu();
     folderEditId = id;
     const tree = folderTree();
-    parentTarget = id ? tree.parents.get(id) || '' : parent;
+    parentTarget = id ? tree.parents.get(id) || '' : '';
+    editColor = id ? colorOf(tree.byId.get(id)) : '';
     syncParentTarget(tree);
-    panel.querySelector('#prompt-box-editor-label').textContent = id ? '폴더 수정' : '새 폴더';
+    panel.querySelector('#prompt-box-editor-label').textContent = id ? '폴더 편집' : '새 폴더';
     const input = panel.querySelector('#prompt-box-folder-name-input');
-    input.value = folders().find(folder => folder.id === id)?.name || '';
+    input.value = tree.byId.get(id)?.name || '';
     input.setCustomValidity('');
+    panel.querySelector('#prompt-box-delete-folder').hidden = !id;
+    panel.querySelector('#prompt-box-delete-confirm').hidden = true;
     panel.querySelector('#prompt-box-folder-editor').hidden = false;
-    setSidebar(false);
-    input.focus();
-    input.select();
+    panel.dataset.editorOpen = 'true';
+    if (id && !isDesktop()) panel.querySelector('#prompt-box-parent-target').focus({ preventScroll: true });
+    else {
+        input.focus({ preventScroll: true });
+        input.select();
+    }
 }
 
 function saveFolder(event) {
@@ -609,31 +895,34 @@ function saveFolder(event) {
         return;
     }
     if (!name || tree.ordered.some(folder => folder.id !== folderEditId && tree.parents.get(folder.id) === parentTarget && normalized(folder.name) === normalized(name))) {
-        input.setCustomValidity(name ? '같은 상위폴더 안에 동일한 이름이 있습니다.' : '폴더 이름을 입력하세요.');
+        input.setCustomValidity(name ? '같은 상위폴더 안에 같은 이름의 폴더가 있습니다.' : '폴더 이름을 입력하세요.');
         input.reportValidity();
         return;
     }
+    const color = parentTarget ? '' : editColor;
     const state = getState();
     if (folderEditId) {
         const folder = state.folders.find(folder => folder.id === folderEditId);
         if (!folder) return;
-        if (folder.name === name && tree.parents.get(folder.id) === parentTarget) {
-            hideFolderEditor();
+        if (folder.name === name && tree.parents.get(folder.id) === parentTarget && colorOf(folder) === color) {
+            hideFolderEditor(true);
             return;
         }
         folder.name = name;
         folder.parentId = parentTarget;
+        if (color) folder.color = color;
+        else delete folder.color;
     } else {
         const folder = { id: globalThis.crypto?.randomUUID?.() || `folder_${Date.now()}_${Math.random().toString(36).slice(2)}`, name, parentId: parentTarget };
+        if (color) folder.color = color;
         state.folders.push(folder);
-        folderId = folder.id;
+        if (parentTarget) state.collapsed = state.collapsed.filter(id => id !== parentTarget);
     }
     hideFolderEditor();
     saveState();
 }
 
-function moveSelected() {
-    const target = moveTarget;
+function moveSelected(target) {
     if (target !== NONE && !folders().some(folder => folder.id === target)) return;
     const state = getState();
     const names = new Set(getCatalog().map(item => item.name));
@@ -650,9 +939,25 @@ function moveSelected() {
         changed++;
     }
     selectedNames.clear();
-    panel.querySelector('#prompt-box-status').textContent = changed ? `${changed}개 이동했습니다.` : '분류가 이미 같습니다.';
+    selectMode = false;
+    const destination = target === NONE ? '미분류' : folderTree().paths.get(target);
+    panel.querySelector('#prompt-box-status').textContent = changed ? `${changed}개 → ${destination}` : '이미 그 폴더에 있습니다.';
     if (changed) saveState();
     else scheduleRender();
+}
+
+function exitSelectMode() {
+    selectMode = false;
+    selectedNames.clear();
+    scheduleRender();
+}
+
+function setOrganizing(value) {
+    organizing = value;
+    selectMode = false;
+    selectedNames.clear();
+    hideFolderEditor();
+    scheduleRender();
 }
 
 async function loadPreset(name) {
@@ -669,18 +974,216 @@ async function loadPreset(name) {
         return;
     }
     loading = true;
+    loadingName = name;
     scheduleRender();
     try {
         await manager.selectPreset(item.value);
         if (!isDesktop()) closePanel();
         else panel.querySelector('#prompt-box-status').textContent = '프리셋을 불러왔습니다.';
     } catch (error) {
-        panel.querySelector('#prompt-box-status').textContent = '불러오지 못했습니다. 다시 시도해 주세요.';
+        panel.querySelector('#prompt-box-status').textContent = '불러오지 못했습니다. 다시 시도하세요.';
         console.error('[prompt-box] Failed to load preset', error);
     } finally {
         loading = false;
+        loadingName = '';
         scheduleRender();
     }
+}
+
+function startLongPress(event) {
+    lastPointerType = event.pointerType;
+    if (organizing || selectMode || loading || event.button > 0) return;
+    const entry = event.target.closest('.prompt-box-load');
+    if (!entry) return;
+    cancelLongPress();
+    longPress = { name: entry.dataset.name, x: event.clientX, y: event.clientY, id: event.pointerId, timer: setTimeout(fireLongPress, LONG_PRESS_MS) };
+    window.addEventListener('pointermove', trackLongPress, { passive: true });
+    window.addEventListener('pointerup', cancelLongPress);
+    window.addEventListener('pointercancel', cancelLongPress);
+}
+
+function trackLongPress(event) {
+    if (longPress && event.pointerId === longPress.id && Math.hypot(event.clientX - longPress.x, event.clientY - longPress.y) > 10) cancelLongPress();
+}
+
+function cancelLongPress() {
+    if (!longPress) return;
+    clearTimeout(longPress.timer);
+    longPress = null;
+    window.removeEventListener('pointermove', trackLongPress);
+    window.removeEventListener('pointerup', cancelLongPress);
+    window.removeEventListener('pointercancel', cancelLongPress);
+}
+
+function fireLongPress() {
+    const name = longPress?.name;
+    cancelLongPress();
+    if (!name || !isOpen()) return;
+    suppressClick = true;
+    window.addEventListener('pointerup', () => setTimeout(() => { suppressClick = false; }, 400), { once: true });
+    selectMode = true;
+    selectedNames.add(name);
+    navigator.vibrate?.(12);
+    render();
+}
+
+function startReorder(event) {
+    const handle = event.target.closest('.prompt-box-drag');
+    if (!handle || !organizing || reorder || event.button > 0) return;
+    const node = handle.closest('.prompt-box-node');
+    const siblings = Array.from(node.parentElement.children).filter(child => child.classList.contains('prompt-box-node'));
+    if (siblings.length < 2) return;
+    event.preventDefault();
+    const nav = panel.querySelector('#prompt-box-folders');
+    const navTop = nav.getBoundingClientRect().top;
+    const boxes = siblings.map(sibling => {
+        const rect = sibling.getBoundingClientRect();
+        return { top: rect.top - navTop + nav.scrollTop, height: rect.height };
+    });
+    const from = siblings.indexOf(node);
+    const gap = boxes[1].top - boxes[0].top - boxes[0].height;
+    reorder = { node, nav, siblings, boxes, from, to: from, gap, pointerId: event.pointerId, startY: event.clientY - navTop + nav.scrollTop };
+    window.addEventListener('pointermove', moveReorder);
+    window.addEventListener('pointerup', endReorder);
+    window.addEventListener('pointercancel', endReorder);
+    try {
+        handle.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    node.dataset.dragging = 'true';
+    panel.dataset.reordering = 'true';
+}
+
+function moveReorder(event) {
+    if (!reorder || event.pointerId !== reorder.pointerId) return;
+    const { nav, boxes, from, siblings, gap } = reorder;
+    const bounds = nav.getBoundingClientRect();
+    if (event.clientY < bounds.top + 36) nav.scrollTop -= 8;
+    else if (event.clientY > bounds.bottom - 36) nav.scrollTop += 8;
+    const dy = event.clientY - bounds.top + nav.scrollTop - reorder.startY;
+    const center = boxes[from].top + boxes[from].height / 2 + dy;
+    let to = from;
+    while (to > 0 && center < boxes[to - 1].top + boxes[to - 1].height / 2) to--;
+    while (to < boxes.length - 1 && center > boxes[to + 1].top + boxes[to + 1].height / 2) to++;
+    reorder.to = to;
+    const shift = boxes[from].height + gap;
+    siblings.forEach((sibling, index) => {
+        let offset = 0;
+        if (index === from) offset = dy;
+        else if (from < to && index > from && index <= to) offset = -shift;
+        else if (from > to && index >= to && index < from) offset = shift;
+        if (offset) sibling.style.setProperty('transform', `translateY(${offset}px)`, 'important');
+        else sibling.style.removeProperty('transform');
+    });
+}
+
+function endReorder(event) {
+    if (!reorder || (event && event.pointerId !== reorder.pointerId)) return;
+    const { node, siblings, from, to } = reorder;
+    reorder = null;
+    window.removeEventListener('pointermove', moveReorder);
+    window.removeEventListener('pointerup', endReorder);
+    window.removeEventListener('pointercancel', endReorder);
+    for (const sibling of siblings) sibling.style.removeProperty('transform');
+    delete node.dataset.dragging;
+    delete panel.dataset.reordering;
+    if (event?.type !== 'pointerup' || from === to) return;
+    const ids = siblings.map(sibling => sibling.dataset.nodeId);
+    ids.splice(to, 0, ...ids.splice(from, 1));
+    placeSiblings(ids);
+}
+
+function startSheetDrag(event) {
+    sheetDrag = null;
+    if (panel.dataset.sheet !== 'true' || event.touches.length !== 1 || reorder || moveMenu || editorOpen() || deleteDialogOpen()) return;
+    const target = event.target;
+    if (target.closest('.prompt-box-drag')) return;
+    const scroller = panel.querySelector(organizing ? '#prompt-box-folders' : '.prompt-box-content');
+    const fromHeader = !!target.closest('.prompt-box-header');
+    const fromList = scroller.contains(target) && scroller.scrollTop <= 0;
+    if (!fromHeader && !fromList) return;
+    const touch = event.touches[0];
+    sheetDrag = { x: touch.clientX, y: touch.clientY, time: event.timeStamp, dy: 0, active: false, fromHeader };
+    panel.addEventListener('touchmove', moveSheetDrag, { passive: false });
+    panel.addEventListener('touchend', endSheetDrag);
+    panel.addEventListener('touchcancel', endSheetDrag);
+}
+
+function moveSheetDrag(event) {
+    if (!sheetDrag) return;
+    const touch = event.touches[0];
+    const dx = touch.clientX - sheetDrag.x;
+    const dy = touch.clientY - sheetDrag.y;
+    if (!sheetDrag.active) {
+        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) {
+            if (dy > 0 && !sheetDrag.fromHeader && event.cancelable) event.preventDefault();
+            return;
+        }
+        if (dy <= 0 || Math.abs(dx) > Math.abs(dy) || !event.cancelable) {
+            endSheetDrag();
+            return;
+        }
+        sheetDrag.active = true;
+        cancelLongPress();
+        panel.dataset.dragging = 'true';
+    }
+    event.preventDefault();
+    sheetDrag.dy = Math.max(0, dy);
+    panel.style.setProperty('transform', `translateY(${sheetDrag.dy}px)`, 'important');
+}
+
+function endSheetDrag(event) {
+    const drag = sheetDrag;
+    sheetDrag = null;
+    panel.removeEventListener('touchmove', moveSheetDrag);
+    panel.removeEventListener('touchend', endSheetDrag);
+    panel.removeEventListener('touchcancel', endSheetDrag);
+    if (!drag?.active) return;
+    suppressClick = true;
+    setTimeout(() => { suppressClick = false; }, 350);
+    delete panel.dataset.dragging;
+    const velocity = drag.dy / Math.max(1, (event?.timeStamp || drag.time) - drag.time);
+    if (drag.dy > Math.min(140, panel.offsetHeight * 0.25) || (velocity > 0.5 && drag.dy > 30)) {
+        panel.style.setProperty('transform', `translateY(${panel.offsetHeight}px)`, 'important');
+        closeTimer = setTimeout(() => {
+            closeTimer = 0;
+            closePanel(false);
+        }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 180);
+    } else panel.style.removeProperty('transform');
+}
+
+function dismissLayer() {
+    if (moveMenu) {
+        closeMoveMenu(true);
+        return true;
+    }
+    if (deleteDialogOpen()) {
+        if (!deleting) hideDeleteDialog(true);
+        return true;
+    }
+    if (editorOpen()) {
+        hideFolderEditor(true);
+        return true;
+    }
+    if (selectMode) {
+        exitSelectMode();
+        return true;
+    }
+    if (organizing) {
+        setOrganizing(false);
+        return true;
+    }
+    return false;
+}
+
+function onPopState() {
+    if (!isOpen() || !historyEntry) return;
+    if (dismissLayer()) {
+        history.pushState({ promptBox: true }, '');
+        return;
+    }
+    historyEntry = false;
+    closePanel();
 }
 
 function handleClick(event) {
@@ -689,8 +1192,6 @@ function handleClick(event) {
     const state = getState();
     const action = control.dataset.action;
     if (action === 'close') closePanel();
-    else if (action === 'sidebar') setSidebar(!sidebarOpen);
-    else if (action === 'close-sidebar') setSidebar(false);
     else if (action === 'toggle-target') {
         if (moveMenu) closeMoveMenu();
         else openMoveMenu();
@@ -703,26 +1204,33 @@ function handleClick(event) {
         panel.querySelector('#prompt-box-folder-name-input').setCustomValidity('');
         closeMoveMenu(true);
     } else if (action === 'choose-target') {
-        moveTarget = control.dataset.targetId;
-        syncMoveTarget();
-        closeMoveMenu(true);
-    }
-    else if (action === 'theme') {
+        closeMoveMenu();
+        moveSelected(control.dataset.targetId);
+    } else if (action === 'choose-color') {
+        editColor = control.dataset.color;
+        syncColorField();
+    } else if (action === 'theme') {
         state.theme = state.theme === 'dark' ? 'light' : 'dark';
         applyTheme();
         saveSettingsDebounced();
-    }
-    else if (action === 'organize') {
-        organizing = !organizing;
-        selectedNames.clear();
-        hideFolderEditor();
+    } else if (action === 'organize') setOrganizing(!organizing);
+    else if (action === 'select') {
+        selectMode = true;
         scheduleRender();
     } else if (action === 'folder') {
-        folderId = control.dataset.folderId;
+        const id = control.dataset.folderId;
+        if (organizing && folderTree().byId.has(id)) {
+            editFolder(id);
+            return;
+        }
+        folderId = id;
         limit = PAGE_SIZE;
-        hideFolderEditor();
         panel.querySelector('.prompt-box-content').scrollTop = 0;
-        if (!organizing) setSidebar(false);
+        scheduleRender();
+    } else if (action === 'collapse') {
+        const id = control.dataset.folderId;
+        state.collapsed = state.collapsed.includes(id) ? state.collapsed.filter(item => item !== id) : [...state.collapsed, id];
+        saveSettingsDebounced();
         scheduleRender();
     } else if (action === 'favorite') {
         const name = control.dataset.favoriteName;
@@ -732,104 +1240,87 @@ function handleClick(event) {
     else if (action === 'more') {
         limit += PAGE_SIZE;
         scheduleRender();
-    } else if (action === 'new-folder') {
-        organizing = true;
-        render();
-        editFolder(null);
-    } else if (action === 'new-child') {
-        organizing = true;
-        editFolder(null, folderId);
-    }
-    else if (action === 'rename-folder') editFolder(folderId);
-    else if (action === 'cancel-folder' || action === 'cancel-delete') hideFolderEditor();
-    else if (action === 'delete-folder') {
-        hideFolderEditor();
-        panel.querySelector('#prompt-box-delete-confirm').hidden = false;
-    } else if (action === 'confirm-delete') {
-        const removed = folderScope(folderId);
+    } else if (action === 'new-folder') editFolder(null);
+    else if (action === 'cancel-folder') hideFolderEditor(true);
+    else if (action === 'delete-folder') panel.querySelector('#prompt-box-delete-confirm').hidden = false;
+    else if (action === 'cancel-delete') panel.querySelector('#prompt-box-delete-confirm').hidden = true;
+    else if (action === 'confirm-delete') {
+        const removed = folderScope(folderEditId);
         state.folders = state.folders.filter(folder => !removed.has(folder.id));
+        state.collapsed = state.collapsed.filter(id => !removed.has(id));
         for (const name of Object.keys(state.assignments)) if (removed.has(state.assignments[name])) delete state.assignments[name];
-        folderId = NONE;
+        if (removed.has(folderId)) folderId = NONE;
         hideFolderEditor();
         saveState();
-    } else if (action === 'folder-up' || action === 'folder-down') {
-        reorderFolder(control.dataset.folderId, action === 'folder-up' ? -1 : 1);
     } else if (action === 'select-results') {
         filteredCatalog().forEach(item => selectedNames.add(item.name));
         scheduleRender();
-    } else if (action === 'clear-selection') {
-        selectedNames.clear();
-        scheduleRender();
-    } else if (action === 'move') moveSelected();
+    } else if (action === 'clear-selection') exitSelectMode();
+    else if (action === 'delete-presets') openDeleteDialog();
+    else if (action === 'cancel-delete-presets') hideDeleteDialog(true);
+    else if (action === 'confirm-delete-presets') void deleteSelectedPresets();
 }
 
 function syncSidebar() {
     const mobile = !isDesktop();
-    const expanded = !mobile || sidebarOpen;
-    panel.dataset.sidebarOpen = String(sidebarOpen);
-    panel.querySelector('#prompt-box-sidebar').inert = !expanded;
-    panel.querySelector('.prompt-box-content').inert = mobile && sidebarOpen;
-    panel.querySelector('#prompt-box-bulk').inert = mobile && sidebarOpen;
-    panel.querySelector('#prompt-box-sidebar-shade').hidden = !mobile || !sidebarOpen;
-    const toggle = panel.querySelector('#prompt-box-sidebar-toggle');
-    toggle.setAttribute('aria-expanded', String(expanded));
-    toggle.setAttribute('aria-label', sidebarOpen ? '폴더 메뉴 접기' : '폴더 메뉴 열기');
-}
-
-function setSidebar(open) {
-    closeMoveMenu();
-    sidebarOpen = open;
-    const focusInSidebar = panel.querySelector('#prompt-box-sidebar').contains(document.activeElement);
-    syncSidebar();
-    if (!isDesktop()) {
-        if (open) panel.querySelector('.prompt-box-folder[aria-current="true"]')?.focus({ preventScroll: true });
-        else if (focusInSidebar) panel.querySelector('#prompt-box-sidebar-toggle').focus({ preventScroll: true });
-    }
+    panel.querySelector('#prompt-box-sidebar').inert = mobile && !organizing;
+    panel.querySelector('.prompt-box-content').inert = mobile && organizing;
 }
 
 function positionPanel() {
     if (!isOpen() || !launcher?.isConnected) return;
+    const mobile = !isDesktop();
+    if (panel.dataset.sheet !== String(mobile)) {
+        panel.dataset.sheet = String(mobile);
+        scheduleRender();
+    }
     syncSidebar();
     const viewport = window.visualViewport;
     const left = viewport?.offsetLeft || 0;
     const top = viewport?.offsetTop || 0;
     const width = viewport?.width || window.innerWidth;
     const height = viewport?.height || window.innerHeight;
-    const mobile = !isDesktop();
-    backdrop.hidden = mobile;
-    panel.setAttribute('aria-modal', String(!mobile));
-    if (!mobile) {
-        backdrop.style.setProperty('width', `${width}px`, 'important');
-        backdrop.style.setProperty('height', `${height}px`, 'important');
-        backdrop.style.setProperty('left', '0px', 'important');
-        backdrop.style.setProperty('top', '0px', 'important');
-        const backgroundRect = backdrop.getBoundingClientRect();
-        backdrop.style.setProperty('left', `${left - backgroundRect.left}px`, 'important');
-        backdrop.style.setProperty('top', `${top - backgroundRect.top}px`, 'important');
-    }
-    panel.style.setProperty('max-height', `${height - (mobile ? 0 : 32)}px`, 'important');
-    panel.style.setProperty('height', `${mobile ? height : Math.min(720, height - 32)}px`, 'important');
-    panel.style.setProperty('width', `${mobile ? width : Math.min(1000, width - 32)}px`, 'important');
-    panel.style.setProperty('left', '0px', 'important');
-    panel.style.setProperty('top', '0px', 'important');
-    const rect = panel.getBoundingClientRect();
-    panel.style.setProperty('left', `${left + (width - rect.width) / 2 - rect.left}px`, 'important');
-    panel.style.setProperty('top', `${top + (height - rect.height) / 2 - rect.top}px`, 'important');
+    backdrop.hidden = false;
+    panel.setAttribute('aria-modal', 'true');
+    backdrop.style.setProperty('width', `${width}px`, 'important');
+    backdrop.style.setProperty('height', `${height}px`, 'important');
+    backdrop.style.setProperty('left', '0px', 'important');
+    backdrop.style.setProperty('top', '0px', 'important');
+    const origin = backdrop.getBoundingClientRect();
+    backdrop.style.setProperty('left', `${left - origin.left}px`, 'important');
+    backdrop.style.setProperty('top', `${top - origin.top}px`, 'important');
+    const panelWidth = mobile ? width : Math.min(1000, width - 32);
+    const panelHeight = Math.max(0, mobile ? height - SHEET_GAP : Math.min(720, height - 32));
+    panel.style.setProperty('max-height', `${panelHeight}px`, 'important');
+    panel.style.setProperty('height', `${panelHeight}px`, 'important');
+    panel.style.setProperty('width', `${panelWidth}px`, 'important');
+    panel.style.setProperty('left', `${left + (width - panelWidth) / 2 - origin.left}px`, 'important');
+    panel.style.setProperty('top', `${top + (mobile ? height - panelHeight : (height - panelHeight) / 2) - origin.top}px`, 'important');
     positionMoveMenu();
 }
 
+function revealCurrent() {
+    const content = panel.querySelector('.prompt-box-content');
+    const row = panel.querySelector('.prompt-box-current-row');
+    content.scrollTop = row ? Math.max(0, row.offsetTop - (content.clientHeight - row.offsetHeight) / 2) : 0;
+}
+
 function handleOutside(event) {
-    if (moveMenu && !moveMenu.contains(event.target) && !menuTrigger().contains(event.target)) closeMoveMenu();
-    if (!isDesktop() && !panel.contains(event.target) && !launcher.contains(event.target)) closePanel(false);
+    if (moveMenu) {
+        if (!moveMenu.contains(event.target) && !menuTrigger().contains(event.target)) closeMoveMenu();
+    } else if (event.target === panel && deleteDialogOpen()) {
+        if (!deleting) hideDeleteDialog(true);
+    } else if (event.target === panel && editorOpen()) hideFolderEditor();
 }
 
 function handleEscape(event) {
     if (event.key === 'Tab' && isDesktop() && !moveMenu) {
-        const controls = Array.from(panel.querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]'))
+        const scope = deleteDialogOpen() ? panel.querySelector('#prompt-box-delete-dialog') : editorOpen() ? panel.querySelector('#prompt-box-folder-editor') : panel;
+        const controls = Array.from(scope.querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]'))
             .filter(node => node.getClientRects().length);
         const first = controls[0];
         const last = controls[controls.length - 1];
-        if (first && (!panel.contains(document.activeElement) || (event.shiftKey ? document.activeElement === first : document.activeElement === last))) {
+        if (first && (!scope.contains(document.activeElement) || (event.shiftKey ? document.activeElement === first : document.activeElement === last))) {
             event.preventDefault();
             (event.shiftKey ? last : first).focus();
         }
@@ -837,20 +1328,25 @@ function handleEscape(event) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
     event.stopPropagation();
-    if (moveMenu) closeMoveMenu(true);
-    else if (!isDesktop() && sidebarOpen) setSidebar(false);
-    else if (!isDesktop()) closePanel();
+    if (!dismissLayer() && !isDesktop()) closePanel();
 }
 
 function openPanel() {
     mount();
     if (!panel) createPanel();
+    clearTimeout(closeTimer);
     panel.hidden = false;
     launcher.setAttribute('aria-expanded', 'true');
     panel.querySelector('#prompt-box-status').textContent = '';
-    render();
     positionPanel();
-    if (!window.matchMedia('(max-width: 600px)').matches) panel.querySelector('#prompt-box-search').focus({ preventScroll: true });
+    const active = currentName();
+    const index = filteredCatalog().findIndex(item => item.name === active);
+    if (index >= limit) limit = Math.ceil((index + 1) / PAGE_SIZE) * PAGE_SIZE;
+    render();
+    if (renderFrame) cancelAnimationFrame(renderFrame);
+    renderFrame = 0;
+    revealCurrent();
+    if (isDesktop()) panel.querySelector('#prompt-box-search').focus({ preventScroll: true });
     else panel.querySelector('[data-action="close"]').focus({ preventScroll: true });
     document.addEventListener('pointerdown', handleOutside);
     document.addEventListener('keydown', handleEscape, true);
@@ -858,26 +1354,44 @@ function openPanel() {
     window.addEventListener('scroll', positionPanel, { passive: true });
     window.visualViewport?.addEventListener('resize', positionPanel);
     window.visualViewport?.addEventListener('scroll', positionPanel);
+    if (!isDesktop() && !historyEntry) {
+        history.pushState({ promptBox: true }, '');
+        historyEntry = true;
+    }
+    window.addEventListener('popstate', onPopState);
 }
 
 function closePanel(restoreFocus = true) {
     if (!panel) return;
+    clearTimeout(closeTimer);
+    closeTimer = 0;
     closeMoveMenu();
-    sidebarOpen = false;
+    cancelLongPress();
+    endReorder();
+    endSheetDrag();
     panel.hidden = true;
+    panel.style.removeProperty('transform');
+    delete panel.dataset.dragging;
     backdrop.hidden = true;
     launcher?.setAttribute('aria-expanded', 'false');
     if (renderFrame) cancelAnimationFrame(renderFrame);
     renderFrame = 0;
     organizing = false;
+    selectMode = false;
     selectedNames.clear();
     hideFolderEditor();
+    hideDeleteDialog();
     document.removeEventListener('pointerdown', handleOutside);
     document.removeEventListener('keydown', handleEscape, true);
     window.removeEventListener('resize', positionPanel);
     window.removeEventListener('scroll', positionPanel);
     window.visualViewport?.removeEventListener('resize', positionPanel);
     window.visualViewport?.removeEventListener('scroll', positionPanel);
+    window.removeEventListener('popstate', onPopState);
+    if (historyEntry) {
+        historyEntry = false;
+        history.back();
+    }
     if (restoreFocus && launcher?.isConnected) launcher.focus({ preventScroll: true });
 }
 
@@ -902,9 +1416,7 @@ function mount() {
         launcher.setAttribute('aria-label', '프롬 정리함');
         launcher.setAttribute('role', 'button');
         launcher.tabIndex = 0;
-        const icon = element('i', 'fa-fw fa-solid fa-folder-open');
-        icon.setAttribute('aria-hidden', 'true');
-        launcher.append(icon);
+        launcher.append(glyph('fa-fw fa-folder-open'));
         launcher.id = 'prompt-box-button';
         launcher.setAttribute('aria-haspopup', 'dialog');
         launcher.setAttribute('aria-controls', 'prompt-box');
