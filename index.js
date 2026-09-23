@@ -1318,7 +1318,7 @@ function endSheetDrag(event) {
                 closeTimer = 0;
                 closePanel(false);
             },
-            window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180,
+            !isDesktop() || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180,
         );
     } else panel.style.removeProperty("transform");
 }

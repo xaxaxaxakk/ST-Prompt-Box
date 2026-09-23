@@ -949,14 +949,7 @@
     color: var(--prompt-box-accent) !important;
 }
 
-@keyframes prompt-box-fade-in {
-    from { opacity: 0; }
-}
-
 @media (max-width: 600px) {
-    #prompt-box-backdrop:not([hidden]) {
-        animation: prompt-box-fade-in 0.2s ease-out !important;
-    }
     #prompt-box[data-sheet="true"] {
         border: 0 !important;
         border-top: 1px solid var(--prompt-box-border) !important;
@@ -975,9 +968,6 @@
     }
     #prompt-box[data-preparing="true"] {
         visibility: hidden !important;
-    }
-    #prompt-box[data-sheet="true"][data-settling="true"] {
-        transition: transform 0.18s ease !important;
     }
     #prompt-box[data-dragging="true"] {
         transition: none !important;
@@ -1215,13 +1205,17 @@
     }
 }
 
-@media (prefers-reduced-motion: reduce) {
-    #prompt-box,
-    #prompt-box *,
-    #prompt-box::after,
-    #prompt-box-backdrop {
+@media (max-width: 600px), (prefers-reduced-motion: reduce) {
+    #prompt-box#prompt-box,
+    #prompt-box#prompt-box *,
+    #prompt-box#prompt-box::before,
+    #prompt-box#prompt-box::after,
+    #prompt-box#prompt-box *::before,
+    #prompt-box#prompt-box *::after,
+    #prompt-box-backdrop#prompt-box-backdrop {
         animation: none !important;
         transition: none !important;
+        scroll-behavior: auto !important;
     }
 }
 
