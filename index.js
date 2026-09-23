@@ -41,6 +41,7 @@ let observedParent;
 let bootObserver;
 let renderFrame = 0;
 let positionFrame = 0;
+let positionTimer = 0;
 let fullRenderPending = false;
 let renderedTree;
 let scrollResetPending = false;
@@ -59,8 +60,6 @@ let longPress = null;
 let suppressClick = false;
 let lastPointerType = "";
 let reorder = null;
-let sheetDrag = null;
-let closeTimer = 0;
 let deleting = false;
 
 function getState() {
@@ -355,7 +354,6 @@ function createPanel() {
     panel.setAttribute("aria-labelledby", "prompt-box-title");
     panel.innerHTML = `
         <header class="prompt-box-header">
-            <div class="prompt-box-grabber" aria-hidden="true"></div>
             <span class="prompt-box-mark"><i class="fa-solid fa-folder-open" aria-hidden="true"></i></span>
             <div class="prompt-box-heading"><strong id="prompt-box-title">프롬 정리함</strong><span id="prompt-box-current"></span></div>
             <button type="button" data-action="theme" id="prompt-box-theme" class="prompt-box-icon" aria-label="다크 모드로 전환"><i class="fa-solid fa-moon" aria-hidden="true"></i></button>
@@ -459,7 +457,6 @@ function createPanel() {
         if (lastPointerType === "touch" && event.target.closest(".prompt-box-row")) event.preventDefault();
     });
     panel.querySelector("#prompt-box-folders").addEventListener("pointerdown", startReorder);
-    panel.addEventListener("touchstart", startSheetDrag, {passive: true});
     panel.addEventListener("keydown", (event) => {
         if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
         const controls = Array.from(panel.querySelectorAll('#prompt-box-list .prompt-box-load, #prompt-box-list input[type="checkbox"]'));
@@ -1253,76 +1250,6 @@ function endReorder(event) {
     placeSiblings(ids);
 }
 
-function startSheetDrag(event) {
-    endSheetDrag();
-    if (panel.dataset.sheet !== "true" || event.touches.length !== 1 || reorder || moveMenu || editorOpen() || deleteDialogOpen()) return;
-    const target = event.target;
-    if (target.closest(".prompt-box-drag")) return;
-    const scroller = panel.querySelector(organizing ? "#prompt-box-folders" : ".prompt-box-content");
-    const fromHeader = !!target.closest(".prompt-box-header");
-    const fromList = scroller.contains(target) && scroller.scrollTop <= 0;
-    if (!fromHeader && !fromList) return;
-    const touch = event.touches[0];
-    sheetDrag = {x: touch.clientX, y: touch.clientY, time: event.timeStamp, dy: 0, active: false, fromHeader};
-    panel.addEventListener("touchmove", moveSheetDrag, {passive: false});
-    panel.addEventListener("touchend", endSheetDrag);
-    panel.addEventListener("touchcancel", endSheetDrag);
-}
-
-function moveSheetDrag(event) {
-    if (!sheetDrag) return;
-    if (event.touches.length !== 1) {
-        endSheetDrag();
-        return;
-    }
-    const touch = event.touches[0];
-    const dx = touch.clientX - sheetDrag.x;
-    const dy = touch.clientY - sheetDrag.y;
-    if (!sheetDrag.active) {
-        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) {
-            if (dy > 0 && !sheetDrag.fromHeader && event.cancelable) event.preventDefault();
-            return;
-        }
-        if (dy <= 0 || Math.abs(dx) > Math.abs(dy) || !event.cancelable) {
-            endSheetDrag();
-            return;
-        }
-        sheetDrag.active = true;
-        cancelLongPress();
-        delete panel.dataset.settling;
-        panel.dataset.dragging = "true";
-    }
-    event.preventDefault();
-    sheetDrag.dy = Math.max(0, dy);
-    panel.style.setProperty("transform", `translateY(${sheetDrag.dy}px)`, "important");
-}
-
-function endSheetDrag(event) {
-    const drag = sheetDrag;
-    sheetDrag = null;
-    panel.removeEventListener("touchmove", moveSheetDrag);
-    panel.removeEventListener("touchend", endSheetDrag);
-    panel.removeEventListener("touchcancel", endSheetDrag);
-    if (!drag?.active) return;
-    suppressClick = true;
-    setTimeout(() => {
-        suppressClick = false;
-    }, 350);
-    delete panel.dataset.dragging;
-    panel.dataset.settling = "true";
-    const velocity = drag.dy / Math.max(1, (event?.timeStamp || drag.time) - drag.time);
-    if (event?.type === "touchend" && (drag.dy > Math.min(140, panel.offsetHeight * 0.25) || (velocity > 0.5 && drag.dy > 30))) {
-        panel.style.setProperty("transform", `translateY(${panel.offsetHeight}px)`, "important");
-        closeTimer = setTimeout(
-            () => {
-                closeTimer = 0;
-                closePanel(false);
-            },
-            !isDesktop() || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180,
-        );
-    } else panel.style.removeProperty("transform");
-}
-
 function dismissLayer() {
     if (moveMenu) {
         closeMoveMenu(true);
@@ -1482,6 +1409,22 @@ function positionPanel() {
 }
 
 function schedulePosition() {
+    if (!isOpen()) return;
+    clearTimeout(positionTimer);
+    positionTimer = 0;
+    if (!isDesktop()) {
+        if (positionFrame) cancelAnimationFrame(positionFrame);
+        positionFrame = 0;
+        positionTimer = setTimeout(() => {
+            positionTimer = 0;
+            queuePosition();
+        }, 120);
+        return;
+    }
+    queuePosition();
+}
+
+function queuePosition() {
     if (positionFrame) return;
     positionFrame = requestAnimationFrame(() => {
         positionFrame = 0;
@@ -1526,9 +1469,9 @@ function handleEscape(event) {
 function openPanel() {
     mount();
     if (!panel) createPanel();
-    clearTimeout(closeTimer);
+    clearTimeout(positionTimer);
+    positionTimer = 0;
     panel.dataset.preparing = "true";
-    delete panel.dataset.settling;
     panel.hidden = false;
     launcher.setAttribute("aria-expanded", "true");
     panel.querySelector("#prompt-box-status").textContent = "";
@@ -1559,17 +1502,13 @@ function openPanel() {
 
 function closePanel(restoreFocus = true) {
     if (!panel) return;
-    clearTimeout(closeTimer);
-    closeTimer = 0;
+    clearTimeout(positionTimer);
+    positionTimer = 0;
     closeMoveMenu();
     cancelLongPress();
     endReorder();
-    endSheetDrag();
     panel.hidden = true;
     delete panel.dataset.preparing;
-    delete panel.dataset.settling;
-    panel.style.removeProperty("transform");
-    delete panel.dataset.dragging;
     backdrop.hidden = true;
     launcher?.setAttribute("aria-expanded", "false");
     if (renderFrame) cancelAnimationFrame(renderFrame);
