@@ -409,7 +409,7 @@
 #prompt-box .prompt-box-content {
     position: relative !important;
     min-width: 0 !important;
-    padding: 8px 10px !important;
+    padding: 8px 10px 0 10px !important;
     overflow-y: auto !important;
     scrollbar-width: thin !important;
     overscroll-behavior: contain !important;
@@ -531,10 +531,40 @@
     line-height: 1.8 !important;
 }
 
-#prompt-box #prompt-box-more {
-    display: block !important;
-    width: 100% !important;
-    margin: 10px 0 2px !important;
+#prompt-box #prompt-box-pagination {
+    position: sticky !important;
+    bottom: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 3px !important;
+    padding: 8px 0 !important;
+    margin-top: 8px !important;
+    background: var(--prompt-box-bg) !important;
+    z-index: 1 !important;
+}
+
+#prompt-box #prompt-box-page-numbers {
+    display: flex !important;
+    align-items: center !important;
+    gap: 3px !important;
+}
+
+#prompt-box #prompt-box-pagination button {
+    width: 30px !important;
+    height: 30px !important;
+    padding: 4px !important;
+    font-variant-numeric: tabular-nums !important;
+}
+
+#prompt-box #prompt-box-pagination [aria-current="page"] {
+    background: var(--prompt-box-accent-soft) !important;
+    border-color: var(--prompt-box-accent) !important;
+    color: var(--prompt-box-accent) !important;
+    font-weight: 700 !important;
+}
+
+#prompt-box .prompt-box-page-gap {
     color: var(--prompt-box-muted) !important;
 }
 
@@ -947,7 +977,7 @@
     #prompt-box .prompt-box-header {
         position: relative !important;
         gap: 6px !important;
-        padding: 16px max(8px, env(safe-area-inset-right)) 8px max(10px, env(safe-area-inset-left)) !important;
+        padding: 16px 8px !important;
         border-bottom: 0 !important;
         touch-action: none !important;
     }
@@ -1048,7 +1078,7 @@
         z-index: 4 !important;
         inset: 0 !important;
         width: 100% !important;
-        padding: 6px max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)) !important;
+        padding: 6px 12px !important;
         border-right: 0 !important;
         background: var(--prompt-box-bg) !important;
         visibility: hidden !important;
@@ -1098,7 +1128,7 @@
     }
     #prompt-box .prompt-box-content {
         height: 100% !important;
-        padding: 6px max(10px, env(safe-area-inset-right)) 8px max(10px, env(safe-area-inset-left)) !important;
+        padding: 6px 10px 0 10px !important;
     }
     #prompt-box :is(.prompt-box-load, .prompt-box-choice) {
         padding: 12px 8px !important;
@@ -1107,9 +1137,9 @@
         font-size: 11px !important;
     }
     #prompt-box button[data-action="favorite"] {
-        flex-basis: 44px !important;
-        width: 44px !important;
-        height: 44px !important;
+        flex-basis: 30px !important;
+        width: 30px !important;
+        height: 30px !important;
     }
     #prompt-box .prompt-box-swatch,
     #prompt-box .prompt-box-swatch:hover:not(:disabled) {
@@ -1118,7 +1148,7 @@
         height: 34px !important;
     }
     #prompt-box #prompt-box-bulk {
-        padding: 10px max(12px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)) !important;
+        padding: 10px 12px !important;
     }
     #prompt-box #prompt-box-bulk button {
         min-height: 36px !important;

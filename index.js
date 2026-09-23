@@ -6,7 +6,7 @@ const KEY = 'prompt-box';
 const ALL = '__all__';
 const NONE = '__uncategorized__';
 const FAVORITES = '__favorites__';
-const PAGE_SIZE = 60;
+const PAGE_SIZE = 20;
 const LONG_PRESS_MS = 450;
 const SHEET_GAP = 24;
 const FOLDER_COLORS = [
@@ -27,7 +27,8 @@ let nativeSyncPending = false;
 let catalog = [];
 let catalogDirty = true;
 let folderId = ALL;
-let limit = PAGE_SIZE;
+let currentPage = 1;
+let pageCount = 1;
 let organizing = false;
 let selectMode = false;
 let panel;
@@ -39,6 +40,10 @@ let placementObserver;
 let observedParent;
 let bootObserver;
 let renderFrame = 0;
+let positionFrame = 0;
+let fullRenderPending = false;
+let renderedTree;
+let settingsSnapshot;
 let loading = false;
 let loadingName = '';
 let folderEditId = null;
@@ -141,8 +146,32 @@ function placeSiblings(ids) {
     saveState();
 }
 
-function saveState() {
+function captureSettings() {
+    const state = getState();
+    return {
+        groups: JSON.stringify([state.folders, state.assignments, state.favorites]),
+        view: JSON.stringify([state.collapsed, state.theme]),
+    };
+}
+
+function savePromptSettings() {
+    settingsSnapshot = captureSettings();
     saveSettingsDebounced();
+}
+
+function handleSettingsUpdated() {
+    const previousSelect = presetSelect;
+    mount();
+    const next = captureSettings();
+    const groupsChanged = next.groups !== settingsSnapshot?.groups;
+    const viewChanged = next.view !== settingsSnapshot?.view;
+    settingsSnapshot = next;
+    if (groupsChanged) queueNativeSync();
+    if (groupsChanged || viewChanged || presetSelect !== previousSelect) scheduleRender();
+}
+
+function saveState() {
+    savePromptSettings();
     queueNativeSync();
     scheduleRender();
 }
@@ -254,11 +283,20 @@ function getCatalog() {
     return catalog;
 }
 
-function scheduleRender() {
-    if (!isOpen() || renderFrame) return;
+function scheduleRender(scope = 'all') {
+    if (!isOpen()) return;
+    if (scope !== 'rows') fullRenderPending = true;
+    if (renderFrame) return;
     renderFrame = requestAnimationFrame(() => {
         renderFrame = 0;
-        if (isOpen()) render();
+        const full = fullRenderPending;
+        fullRenderPending = false;
+        if (!isOpen()) return;
+        if (full || !renderedTree) render();
+        else {
+            renderRows(currentName(), new Set(getState().favorites), renderedTree);
+            renderBulk();
+        }
     });
 }
 
@@ -329,7 +367,11 @@ function createPanel() {
             <main class="prompt-box-content">
                 <div class="prompt-box-list-header"><strong id="prompt-box-folder-name"></strong><span id="prompt-box-result-count"></span><button type="button" data-action="select" id="prompt-box-select" class="prompt-box-icon" title="여러 개 골라서 이동·삭제" aria-label="여러 개 골라서 이동·삭제"><i class="fa-solid fa-list-check" aria-hidden="true"></i></button></div>
                 <div id="prompt-box-list" aria-label="프리셋 목록"></div>
-                <button type="button" id="prompt-box-more" data-action="more" hidden>더 보기</button>
+                <nav id="prompt-box-pagination" aria-label="프리셋 페이지" hidden>
+                    <button type="button" data-action="previous-page" aria-label="이전 페이지"><i class="fa-solid fa-chevron-left" aria-hidden="true"></i></button>
+                    <span id="prompt-box-page-numbers"></span>
+                    <button type="button" data-action="next-page" aria-label="다음 페이지"><i class="fa-solid fa-chevron-right" aria-hidden="true"></i></button>
+                </nav>
             </main>
         </div>
         <form id="prompt-box-folder-editor" aria-labelledby="prompt-box-editor-label" hidden>
@@ -378,8 +420,9 @@ function createPanel() {
         renderBulk();
     });
     panel.querySelector('#prompt-box-search').addEventListener('input', () => {
-        limit = PAGE_SIZE;
-        scheduleRender();
+        currentPage = 1;
+        panel.querySelector('.prompt-box-content').scrollTop = 0;
+        scheduleRender('rows');
     });
     panel.querySelector('#prompt-box-folder-editor').addEventListener('submit', saveFolder);
     panel.querySelector('#prompt-box-folder-name-input').addEventListener('input', event => event.target.setCustomValidity(''));
@@ -430,6 +473,7 @@ function filteredCatalog(tree = folderTree()) {
 }
 
 function render() {
+    fullRenderPending = false;
     closeMoveMenu(!!moveMenu?.contains(document.activeElement));
     const focused = document.activeElement;
     const focusedAction = focused?.dataset.action;
@@ -437,6 +481,7 @@ function render() {
     const state = getState();
     applyTheme();
     const tree = folderTree();
+    renderedTree = tree;
     if (![ALL, NONE, FAVORITES].includes(folderId) && !tree.byId.has(folderId)) folderId = ALL;
     panel.dataset.organizing = String(organizing);
     panel.dataset.selecting = String(selectMode);
@@ -463,7 +508,7 @@ function render() {
         { id: FAVORITES, name: '즐겨찾기', count: favoriteCount, icon: 'fa-star' },
         { id: NONE, name: '미분류', count: uncategorized, icon: 'fa-inbox' },
     ];
-    renderFolders(tree, views, counts);
+    if (isDesktop() || organizing) renderFolders(tree, views, counts);
     const chips = panel.querySelector('#prompt-box-chips');
     if (!isDesktop() && !organizing) renderChips(tree, views, counts);
     else if (chips.firstChild) chips.replaceChildren();
@@ -613,9 +658,47 @@ function applyTheme() {
     toggle.firstElementChild.className = `fa-solid ${dark ? 'fa-sun' : 'fa-moon'}`;
 }
 
+function renderPagination() {
+    const pager = panel.querySelector('#prompt-box-pagination');
+    pager.hidden = pageCount <= 1;
+    pager.querySelector('[data-action="previous-page"]').disabled = currentPage === 1;
+    pager.querySelector('[data-action="next-page"]').disabled = currentPage === pageCount;
+    const numbers = panel.querySelector('#prompt-box-page-numbers');
+    const focusedPage = numbers.contains(document.activeElement) ? document.activeElement.dataset.page : undefined;
+    const pages = new Set([1, pageCount]);
+    const start = Math.max(1, Math.min(currentPage - 1, pageCount - 2));
+    for (let page = start; page <= Math.min(pageCount, start + 2); page++) pages.add(page);
+    const fragment = document.createDocumentFragment();
+    let previous = 0;
+    for (const page of [...pages].sort((a, b) => a - b)) {
+        if (previous && page > previous + 1) {
+            const gap = element('span', 'prompt-box-page-gap', '…');
+            gap.setAttribute('aria-hidden', 'true');
+            fragment.append(gap);
+        }
+        const item = button(String(page), 'page');
+        item.dataset.page = String(page);
+        item.setAttribute('aria-label', `${page}페이지`);
+        if (page === currentPage) item.setAttribute('aria-current', 'page');
+        fragment.append(item);
+        previous = page;
+    }
+    numbers.replaceChildren(fragment);
+    if (focusedPage !== undefined) {
+        const target = Array.from(numbers.children).find(node => node.dataset.page === focusedPage)
+            || numbers.querySelector('[aria-current="page"]');
+        target?.focus({ preventScroll: true });
+    }
+}
+
 function renderRows(active, favoriteNames, tree) {
     const matching = filteredCatalog(tree);
-    const shown = matching.slice(0, limit);
+    pageCount = Math.max(1, Math.ceil(matching.length / PAGE_SIZE));
+    const nextPage = Math.max(1, Math.min(currentPage, pageCount));
+    if (nextPage !== currentPage) panel.querySelector('.prompt-box-content').scrollTop = 0;
+    currentPage = nextPage;
+    const start = (currentPage - 1) * PAGE_SIZE;
+    const shown = matching.slice(start, start + PAGE_SIZE);
     const focused = document.activeElement;
     const focusName = focused?.dataset.favoriteName;
     const list = panel.querySelector('#prompt-box-list');
@@ -667,9 +750,7 @@ function renderRows(active, favoriteNames, tree) {
     if (!matching.length) fragment.append(element('div', 'prompt-box-empty', panel.querySelector('#prompt-box-search').value ? '검색 결과가 없습니다. 다른 폴더나 다른 이름으로 검색해 보세요.' : folderId === FAVORITES ? '별을 누르면 자주 쓰는 프리셋을 여기에 모을 수 있습니다.' : '이 폴더에는 프리셋이 없습니다. 프리셋을 길게 눌러 이 폴더로 옮길 수 있습니다.'));
     list.replaceChildren(fragment);
     panel.querySelector('#prompt-box-result-count').textContent = `${matching.length}개`;
-    const more = panel.querySelector('#prompt-box-more');
-    more.hidden = matching.length <= shown.length;
-    more.textContent = `더 보기 · ${shown.length} / ${matching.length}`;
+    renderPagination();
     if (focusName !== undefined) Array.from(list.querySelectorAll('[data-favorite-name]')).find(node => node.dataset.favoriteName === focusName)?.focus({ preventScroll: true });
 }
 
@@ -741,11 +822,11 @@ async function deleteSelectedPresets() {
                 await eventSource.emit(event_types.PRESET_DELETED, { apiId: 'openai', name });
             } else failed.push(name);
         } catch (error) {
-            console.error('[prompt-box] Failed to delete preset', name, error);
+            console.error('[프롬 정리함] 프리셋 삭제 실패', name, error);
             failed.push(name);
         }
     }
-    saveSettingsDebounced();
+    savePromptSettings();
     deleting = false;
     buttons.forEach(node => { node.disabled = false; });
     hideDeleteDialog();
@@ -989,7 +1070,7 @@ async function loadPreset(name) {
         else panel.querySelector('#prompt-box-status').textContent = '프리셋을 불러왔습니다.';
     } catch (error) {
         panel.querySelector('#prompt-box-status').textContent = '불러오지 못했습니다. 다시 시도하세요.';
-        console.error('[prompt-box] Failed to load preset', error);
+        console.error('[프롬 정리함] 프리셋 불러오기 실패', error);
     } finally {
         loading = false;
         loadingName = '';
@@ -1221,7 +1302,7 @@ function handleClick(event) {
     } else if (action === 'theme') {
         state.theme = state.theme === 'dark' ? 'light' : 'dark';
         applyTheme();
-        saveSettingsDebounced();
+        savePromptSettings();
     } else if (action === 'organize') setOrganizing(!organizing);
     else if (action === 'select') {
         selectMode = true;
@@ -1233,22 +1314,25 @@ function handleClick(event) {
             return;
         }
         folderId = id;
-        limit = PAGE_SIZE;
+        currentPage = 1;
         panel.querySelector('.prompt-box-content').scrollTop = 0;
         scheduleRender();
     } else if (action === 'collapse') {
         const id = control.dataset.folderId;
         state.collapsed = state.collapsed.includes(id) ? state.collapsed.filter(item => item !== id) : [...state.collapsed, id];
-        saveSettingsDebounced();
+        savePromptSettings();
         scheduleRender();
     } else if (action === 'favorite') {
         const name = control.dataset.favoriteName;
         state.favorites = state.favorites.includes(name) ? state.favorites.filter(item => item !== name) : [...state.favorites, name];
         saveState();
     } else if (action === 'load') void loadPreset(control.dataset.name);
-    else if (action === 'more') {
-        limit += PAGE_SIZE;
-        scheduleRender();
+    else if (['page', 'previous-page', 'next-page'].includes(action)) {
+        const requested = action === 'page' ? Number(control.dataset.page) : currentPage + (action === 'next-page' ? 1 : -1);
+        if (!Number.isInteger(requested) || requested < 1 || requested > pageCount || requested === currentPage) return;
+        currentPage = requested;
+        panel.querySelector('.prompt-box-content').scrollTop = 0;
+        scheduleRender('rows');
     } else if (action === 'new-folder') editFolder(null);
     else if (action === 'cancel-folder') hideFolderEditor(true);
     else if (action === 'delete-folder') panel.querySelector('#prompt-box-delete-confirm').hidden = false;
@@ -1308,6 +1392,14 @@ function positionPanel() {
     positionMoveMenu();
 }
 
+function schedulePosition() {
+    if (positionFrame) return;
+    positionFrame = requestAnimationFrame(() => {
+        positionFrame = 0;
+        positionPanel();
+    });
+}
+
 function revealCurrent() {
     const content = panel.querySelector('.prompt-box-content');
     const row = panel.querySelector('.prompt-box-current-row');
@@ -1352,7 +1444,7 @@ function openPanel() {
     positionPanel();
     const active = currentName();
     const index = filteredCatalog().findIndex(item => item.name === active);
-    if (index >= limit) limit = Math.ceil((index + 1) / PAGE_SIZE) * PAGE_SIZE;
+    currentPage = index >= 0 ? Math.floor(index / PAGE_SIZE) + 1 : 1;
     render();
     if (renderFrame) cancelAnimationFrame(renderFrame);
     renderFrame = 0;
@@ -1362,10 +1454,10 @@ function openPanel() {
     else panel.querySelector('[data-action="close"]').focus({ preventScroll: true });
     document.addEventListener('pointerdown', handleOutside);
     document.addEventListener('keydown', handleEscape, true);
-    window.addEventListener('resize', positionPanel);
-    window.addEventListener('scroll', positionPanel, { passive: true });
-    window.visualViewport?.addEventListener('resize', positionPanel);
-    window.visualViewport?.addEventListener('scroll', positionPanel);
+    window.addEventListener('resize', schedulePosition);
+    window.addEventListener('scroll', schedulePosition, { passive: true });
+    window.visualViewport?.addEventListener('resize', schedulePosition);
+    window.visualViewport?.addEventListener('scroll', schedulePosition);
     if (!isDesktop() && !historyEntry) {
         history.pushState({ promptBox: true }, '');
         historyEntry = true;
@@ -1390,6 +1482,7 @@ function closePanel(restoreFocus = true) {
     launcher?.setAttribute('aria-expanded', 'false');
     if (renderFrame) cancelAnimationFrame(renderFrame);
     renderFrame = 0;
+    fullRenderPending = false;
     organizing = false;
     selectMode = false;
     selectedNames.clear();
@@ -1397,10 +1490,12 @@ function closePanel(restoreFocus = true) {
     hideDeleteDialog();
     document.removeEventListener('pointerdown', handleOutside);
     document.removeEventListener('keydown', handleEscape, true);
-    window.removeEventListener('resize', positionPanel);
-    window.removeEventListener('scroll', positionPanel);
-    window.visualViewport?.removeEventListener('resize', positionPanel);
-    window.visualViewport?.removeEventListener('scroll', positionPanel);
+    window.removeEventListener('resize', schedulePosition);
+    window.removeEventListener('scroll', schedulePosition);
+    window.visualViewport?.removeEventListener('resize', schedulePosition);
+    window.visualViewport?.removeEventListener('scroll', schedulePosition);
+    if (positionFrame) cancelAnimationFrame(positionFrame);
+    positionFrame = 0;
     window.removeEventListener('popstate', onPopState);
     if (historyEntry) {
         historyEntry = false;
@@ -1468,11 +1563,11 @@ function mount() {
 function initialize() {
     if (initialized) return;
     initialized = true;
-    getState();
+    settingsSnapshot = captureSettings();
     const on = (type, callback) => { if (type) eventSource.on(type, callback); };
     on(event_types.OAI_PRESET_CHANGED_AFTER, () => { mount(); scheduleRender(); });
     on(event_types.APP_READY, mount);
-    on(event_types.SETTINGS_UPDATED, () => { mount(); queueNativeSync(); scheduleRender(); });
+    on(event_types.SETTINGS_UPDATED, handleSettingsUpdated);
     on(event_types.PRESET_RENAMED, ({ apiId, oldName, newName }) => {
         if (apiId !== 'openai') return;
         const state = getState();
