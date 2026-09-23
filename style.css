@@ -99,8 +99,7 @@
 }
 
 #prompt-box :is(button, input, select):focus-visible {
-    outline: 2px solid var(--prompt-box-focus) !important;
-    outline-offset: -2px !important;
+    outline: 0 !important;
 }
 
 #prompt-box button:disabled {
@@ -192,9 +191,24 @@
 }
 
 #prompt-box .prompt-box-search input {
+    flex: 1 !important;
     border: 0 !important;
     background: transparent !important;
     padding: 9px 0 !important;
+}
+
+#prompt-box .prompt-box-search .prompt-box-search-submit {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex: 0 0 auto !important;
+    width: 32px !important;
+    height: 32px !important;
+    margin-right: -6px !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    color: var(--prompt-box-muted) !important;
 }
 
 #prompt-box .prompt-box-workspace {
@@ -408,6 +422,8 @@
 
 #prompt-box .prompt-box-content {
     position: relative !important;
+    display: flex !important;
+    flex-direction: column !important;
     min-width: 0 !important;
     padding: 8px 10px 0 10px !important;
     overflow-y: auto !important;
@@ -430,7 +446,12 @@
     font-size: 12px !important;
 }
 
+#prompt-box .prompt-box-content > * {
+    flex-shrink: 0 !important;
+}
+
 #prompt-box #prompt-box-result-count {
+    font-variant-numeric: tabular-nums !important;
     color: var(--prompt-box-muted) !important;
     font-size: 11px !important;
 }
@@ -539,9 +560,17 @@
     justify-content: center !important;
     gap: 3px !important;
     padding: 8px 0 !important;
-    margin-top: 8px !important;
+    margin-top: auto !important;
     background: var(--prompt-box-bg) !important;
     z-index: 1 !important;
+}
+
+#prompt-box #prompt-box-list {
+    margin-bottom: 8px !important;
+}
+
+#prompt-box #prompt-box-pagination[data-single="true"] {
+    visibility: hidden !important;
 }
 
 #prompt-box #prompt-box-page-numbers {
