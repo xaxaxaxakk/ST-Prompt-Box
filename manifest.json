@@ -1,0 +1,11 @@
+{
+  "display_name": "프롬 정리함",
+  "loading_order": 999,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "",
+  "version": "1.0.0",
+  "auto_update": false
+}
