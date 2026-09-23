@@ -7,6 +7,8 @@
 
 #prompt-box-backdrop {
     position: fixed !important;
+    left: 0 !important;
+    top: 0 !important;
     z-index: 39999 !important;
     background: rgb(0 0 0 / 60%) !important;
     touch-action: none !important;
@@ -947,17 +949,8 @@
     color: var(--prompt-box-accent) !important;
 }
 
-@keyframes prompt-box-sheet-in {
-    from { transform: translate3d(0, 100%, 0); }
-    to { transform: none; }
-}
-
 @keyframes prompt-box-fade-in {
     from { opacity: 0; }
-}
-
-@keyframes prompt-box-pop-in {
-    from { opacity: 0; transform: translate3d(0, 12px, 0); }
 }
 
 @media (max-width: 600px) {
@@ -972,14 +965,13 @@
         transition: none !important;
     }
     #prompt-box[data-sheet="true"]:not([hidden]):not([data-preparing="true"]) {
-        animation: prompt-box-sheet-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both !important;
-        backface-visibility: hidden !important;
+        animation: none !important;
     }
     #prompt-box :is(#prompt-box-folder-editor, #prompt-box-delete-dialog, .prompt-box-dropdown-menu):not([hidden]) {
-        animation: prompt-box-pop-in 0.16s ease-out !important;
+        animation: none !important;
     }
     #prompt-box[data-sheet="true"]:is([data-editor-open="true"], [data-dialog-open="true"], [data-menu-open="true"])::after {
-        animation: prompt-box-fade-in 0.16s ease-out !important;
+        animation: none !important;
     }
     #prompt-box[data-preparing="true"] {
         visibility: hidden !important;
@@ -1048,7 +1040,7 @@
         margin: 4px 10px 8px !important;
     }
     #prompt-box :is(.prompt-box-search input, #prompt-box-folder-name-input) {
-        font-size: 14px !important;
+        font-size: 16px !important;
     }
     #prompt-box #prompt-box-chips {
         display: flex !important;

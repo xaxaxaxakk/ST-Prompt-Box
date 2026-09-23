@@ -1031,7 +1031,7 @@ function editFolder(id) {
     panel.querySelector("#prompt-box-delete-confirm").hidden = true;
     panel.querySelector("#prompt-box-folder-editor").hidden = false;
     panel.dataset.editorOpen = "true";
-    if (id && !isDesktop()) panel.querySelector("#prompt-box-parent-target").focus({preventScroll: true});
+    if (!isDesktop()) panel.querySelector("#prompt-box-parent-target").focus({preventScroll: true});
     else {
         input.focus({preventScroll: true});
         input.select();
@@ -1254,7 +1254,7 @@ function endReorder(event) {
 }
 
 function startSheetDrag(event) {
-    sheetDrag = null;
+    endSheetDrag();
     if (panel.dataset.sheet !== "true" || event.touches.length !== 1 || reorder || moveMenu || editorOpen() || deleteDialogOpen()) return;
     const target = event.target;
     if (target.closest(".prompt-box-drag")) return;
@@ -1271,6 +1271,10 @@ function startSheetDrag(event) {
 
 function moveSheetDrag(event) {
     if (!sheetDrag) return;
+    if (event.touches.length !== 1) {
+        endSheetDrag();
+        return;
+    }
     const touch = event.touches[0];
     const dx = touch.clientX - sheetDrag.x;
     const dy = touch.clientY - sheetDrag.y;
@@ -1307,7 +1311,7 @@ function endSheetDrag(event) {
     delete panel.dataset.dragging;
     panel.dataset.settling = "true";
     const velocity = drag.dy / Math.max(1, (event?.timeStamp || drag.time) - drag.time);
-    if (drag.dy > Math.min(140, panel.offsetHeight * 0.25) || (velocity > 0.5 && drag.dy > 30)) {
+    if (event?.type === "touchend" && (drag.dy > Math.min(140, panel.offsetHeight * 0.25) || (velocity > 0.5 && drag.dy > 30))) {
         panel.style.setProperty("transform", `translateY(${panel.offsetHeight}px)`, "important");
         closeTimer = setTimeout(
             () => {
@@ -1437,6 +1441,12 @@ function syncSidebar() {
     panel.querySelector(".prompt-box-content").inert = mobile && organizing;
 }
 
+function setPositionStyle(node, property, value) {
+    if (node.style.getPropertyValue(property) !== value) {
+        node.style.setProperty(property, value, "important");
+    }
+}
+
 function positionPanel() {
     if (!isOpen() || !launcher?.isConnected) return;
     const mobile = !isDesktop();
@@ -1452,20 +1462,22 @@ function positionPanel() {
     const height = viewport?.height || window.innerHeight;
     backdrop.hidden = false;
     panel.setAttribute("aria-modal", "true");
-    backdrop.style.setProperty("width", `${width}px`, "important");
-    backdrop.style.setProperty("height", `${height}px`, "important");
-    backdrop.style.setProperty("left", "0px", "important");
-    backdrop.style.setProperty("top", "0px", "important");
-    const origin = backdrop.getBoundingClientRect();
-    backdrop.style.setProperty("left", `${left - origin.left}px`, "important");
-    backdrop.style.setProperty("top", `${top - origin.top}px`, "important");
+    const bounds = backdrop.getBoundingClientRect();
+    const origin = {
+        left: bounds.left - (parseFloat(backdrop.style.left) || 0),
+        top: bounds.top - (parseFloat(backdrop.style.top) || 0),
+    };
+    setPositionStyle(backdrop, "width", `${width}px`);
+    setPositionStyle(backdrop, "height", `${height}px`);
+    setPositionStyle(backdrop, "left", `${left - origin.left}px`);
+    setPositionStyle(backdrop, "top", `${top - origin.top}px`);
     const panelWidth = mobile ? width : Math.min(1000, width - 32);
     const panelHeight = Math.max(0, mobile ? height - SHEET_GAP : Math.min(720, height - 32));
-    panel.style.setProperty("max-height", `${panelHeight}px`, "important");
-    panel.style.setProperty("height", `${panelHeight}px`, "important");
-    panel.style.setProperty("width", `${panelWidth}px`, "important");
-    panel.style.setProperty("left", `${left + (width - panelWidth) / 2 - origin.left}px`, "important");
-    panel.style.setProperty("top", `${top + (mobile ? height - panelHeight : (height - panelHeight) / 2) - origin.top}px`, "important");
+    setPositionStyle(panel, "max-height", `${panelHeight}px`);
+    setPositionStyle(panel, "height", `${panelHeight}px`);
+    setPositionStyle(panel, "width", `${panelWidth}px`);
+    setPositionStyle(panel, "left", `${left + (width - panelWidth) / 2 - origin.left}px`);
+    setPositionStyle(panel, "top", `${top + (mobile ? height - panelHeight : (height - panelHeight) / 2) - origin.top}px`);
     positionMoveMenu();
 }
 
