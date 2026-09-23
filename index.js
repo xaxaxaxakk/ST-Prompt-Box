@@ -406,6 +406,13 @@ function createPanel() {
         event.preventDefault();
         controls[(index + (event.key === 'ArrowDown' ? 1 : controls.length - 1) + controls.length) % controls.length].focus();
     });
+    for (const surface of [panel, backdrop]) {
+        for (const type of ['touchstart', 'mousedown']) {
+            surface.addEventListener(type, event => {
+                event.stopPropagation();
+            }, { passive: true });
+        }
+    }
     document.body.append(backdrop, panel);
 }
 

@@ -566,7 +566,7 @@
 }
 
 #prompt-box :is(#prompt-box-editor-label, #prompt-box-delete-title) {
-    font-size: 15px !important;
+    font-size: 14px !important;
 }
 
 #prompt-box #prompt-box-delete-dialog {
@@ -740,6 +740,11 @@
     border-top: 1px solid var(--prompt-box-border) !important;
     background: var(--prompt-box-soft) !important;
     font-size: 12px !important;
+
+    button {
+        width: 30px !important;
+        height: 30px !important;
+    }
 }
 
 #prompt-box #prompt-box-selected-count {
@@ -972,7 +977,7 @@
         margin: 4px 10px 8px !important;
     }
     #prompt-box :is(.prompt-box-search input, #prompt-box-folder-name-input) {
-        font-size: 16px !important;
+        font-size: 14px !important;
     }
     #prompt-box #prompt-box-chips {
         display: flex !important;
