@@ -1,3 +1,10 @@
+@font-face {
+    font-family: 'Pretendard';
+    src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/pretendard@1.0/Pretendard-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-display: swap;
+}
+
 #prompt-box-backdrop {
     position: fixed !important;
     z-index: 39999 !important;
@@ -32,8 +39,8 @@
     background: var(--prompt-box-bg) !important;
     color: var(--prompt-box-text) !important;
     box-shadow: 0 10px 25px rgb(0 0 0 / 12%) !important;
-    font-family: "Pretendard", var(--mainFontFamily, sans-serif) !important;
-    font-size: 13px !important;
+    font-family: "Pretendard" !important;
+    font-size: 14px !important;
     line-height: 1.45 !important;
     text-align: left !important;
     text-shadow: none !important;
@@ -67,7 +74,7 @@
 
 #prompt-box :is(button, input, select) {
     font-family: inherit !important;
-    font-size: inherit !important;
+    font-size: 14px !important;
     color: var(--prompt-box-text) !important;
     text-shadow: none !important;
     box-shadow: none !important;
