@@ -1,6 +1,7 @@
 import {extension_settings} from "/scripts/extensions.js";
-import {saveSettingsDebounced, eventSource, event_types} from "/script.js";
+import {saveSettingsDebounced, eventSource, event_types, getRequestHeaders} from "/script.js";
 import {getPresetManager} from "/scripts/preset-manager.js";
+import {getSanitizedFilename} from "/scripts/utils.js";
 
 const KEY = "prompt-box";
 const ALL = "__all__";
@@ -22,6 +23,10 @@ const FOLDER_COLORS = [
 const FAVORITE_COLOR = "#d4a82a";
 const COLOR_VALUES = new Set(FOLDER_COLORS.map(([value]) => value));
 const presetOrder = new Intl.Collator(undefined, {numeric: true, sensitivity: "base"});
+const EMOJI_PATTERN = /\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|[‍︎️⃣]|[\u{E0020}-\u{E007F}]/gu;
+const VERSION_PATTERN = /(?<![\p{L}\p{N}.])(?:(?:ver\.?|v)\d+(?:\.\d+)*|\d+(?:\.\d+)+)(?![\p{L}\p{N}]|\.\d)/giu;
+const UNSAFE_FILENAME = /[\/\\?<>:*|"\u0000-\u001f\u0080-\u009f]/g;
+const renameOptions = {emoji: false, underscore: false, version: true};
 const selectedNames = new Set();
 let nativeSyncPending = false;
 let catalog = [];
@@ -60,6 +65,8 @@ let suppressClick = false;
 let lastPointerType = "";
 let reorder = null;
 let deleting = false;
+let renaming = false;
+let statusTimer = 0;
 
 function getState() {
     let state = extension_settings[KEY];
@@ -290,12 +297,20 @@ function getCatalog() {
 function scheduleRender(scope = "all") {
     if (!isOpen()) return;
     if (scope !== "rows") fullRenderPending = true;
+    if (deleting || renaming) {
+        fullRenderPending = true;
+        return;
+    }
     if (renderFrame) return;
     renderFrame = requestAnimationFrame(() => {
         renderFrame = 0;
         const full = fullRenderPending;
         fullRenderPending = false;
         if (!isOpen()) return;
+        if (deleting || renaming) {
+            fullRenderPending = true;
+            return;
+        }
         if (full || !renderedTree) render();
         else {
             renderRows(currentName(), new Set(getState().favorites), renderedTree);
@@ -308,6 +323,12 @@ function invalidateCatalog() {
     catalogDirty = true;
     queueNativeSync();
     scheduleRender();
+}
+
+function setStatus(text) {
+    clearTimeout(statusTimer);
+    panel.querySelector("#prompt-box-status").textContent = text;
+    if (text) statusTimer = setTimeout(() => setStatus(""), 3000);
 }
 
 function element(tag, className, text) {
@@ -368,7 +389,7 @@ function createPanel() {
                 <button type="button" data-action="new-folder" id="prompt-box-new-folder" hidden><i class="fa-solid fa-plus" aria-hidden="true"></i><span>새 폴더</span></button>
             </aside>
             <main class="prompt-box-content">
-                <div class="prompt-box-list-header"><strong id="prompt-box-folder-name"></strong><span id="prompt-box-result-count"></span><button type="button" data-action="select" id="prompt-box-select" class="prompt-box-icon" title="여러 개 골라서 이동·삭제" aria-label="여러 개 골라서 이동·삭제"><i class="fa-solid fa-list-check" aria-hidden="true"></i></button></div>
+                <div class="prompt-box-list-header"><strong id="prompt-box-folder-name"></strong><span id="prompt-box-result-count"></span><button type="button" data-action="select" id="prompt-box-select" class="prompt-box-icon" title="여러 개 골라서 이동·이름 변경·삭제" aria-label="여러 개 골라서 이동·이름 변경·삭제"><i class="fa-solid fa-list-check" aria-hidden="true"></i></button></div>
                 <div id="prompt-box-list" aria-label="프리셋 목록"></div>
                 <nav id="prompt-box-pagination" aria-label="프리셋 페이지">
                     <button type="button" data-action="previous-page" aria-label="이전 페이지"><i class="fa-solid fa-chevron-left" aria-hidden="true"></i></button>
@@ -393,8 +414,23 @@ function createPanel() {
             <ul id="prompt-box-delete-names"></ul>
             <p id="prompt-box-delete-note" hidden></p>
             <div class="prompt-box-editor-actions"><button type="button" data-action="cancel-delete-presets">취소</button><button type="button" data-action="confirm-delete-presets" id="prompt-box-confirm-delete-presets" class="prompt-box-danger-primary">삭제</button></div>
+            <div class="prompt-box-busy" role="status" aria-live="polite" hidden><i class="fa-solid fa-spinner fa-spin-pulse" aria-hidden="true"></i><strong class="prompt-box-busy-label"></strong><span class="prompt-box-busy-progress"></span></div>
         </div>
-        <div id="prompt-box-bulk" hidden><span id="prompt-box-selected-count"></span><button type="button" data-action="select-results"><i class="fa-solid fa-check-double"></i></button><button type="button" data-action="clear-selection"><i class="fa-solid fa-stop"></i></button><button type="button" data-action="delete-presets" id="prompt-box-delete-presets" class="prompt-box-danger"><i class="fa-solid fa-trash-can" aria-hidden="true"></i></button><button type="button" data-action="toggle-target" id="prompt-box-move" class="prompt-box-primary" aria-haspopup="listbox" aria-controls="prompt-box-move-menu" aria-expanded="false"><i class="fa-solid fa-truck-moving"></i></button></div>
+        <form id="prompt-box-rename-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-box-rename-title" hidden>
+            <strong id="prompt-box-rename-title">이름 바꾸기</strong>
+            <label for="prompt-box-rename-input" class="prompt-box-field-label" id="prompt-box-rename-label">새 이름</label>
+            <input id="prompt-box-rename-input" maxlength="200" autocomplete="off" spellcheck="false">
+            <div class="prompt-box-rename-options" role="group" aria-label="이름 정리 옵션">
+                <label><input type="checkbox" data-rename-option="emoji"><span>이모지 제거</span></label>
+                <label><input type="checkbox" data-rename-option="underscore"><span>언더바 → 공백</span></label>
+                <label id="prompt-box-rename-version"><input type="checkbox" data-rename-option="version"><span>버전 번호 유지 <small>(v1, v1.5, 1.0.0…)</small></span></label>
+            </div>
+            <span class="prompt-box-field-label" id="prompt-box-rename-summary"></span>
+            <ul id="prompt-box-rename-preview" aria-labelledby="prompt-box-rename-summary"></ul>
+            <div class="prompt-box-editor-actions"><button type="button" data-action="cancel-rename">취소</button><button type="submit" id="prompt-box-confirm-rename" class="prompt-box-primary">바꾸기</button></div>
+            <div class="prompt-box-busy" role="status" aria-live="polite" hidden><i class="fa-solid fa-spinner fa-spin-pulse" aria-hidden="true"></i><strong class="prompt-box-busy-label"></strong><span class="prompt-box-busy-progress"></span></div>
+        </form>
+        <div id="prompt-box-bulk" hidden><span id="prompt-box-selected-count"></span><button type="button" data-action="select-results"><i class="fa-solid fa-check-double"></i></button><button type="button" data-action="clear-selection"><i class="fa-solid fa-stop"></i></button><button type="button" data-action="rename-presets" id="prompt-box-rename-presets" title="이름 바꾸기" aria-label="이름 바꾸기"><i class="fa-solid fa-pen" aria-hidden="true"></i></button><button type="button" data-action="delete-presets" id="prompt-box-delete-presets" class="prompt-box-danger"><i class="fa-solid fa-trash-can" aria-hidden="true"></i></button><button type="button" data-action="toggle-target" id="prompt-box-move" class="prompt-box-primary" aria-haspopup="listbox" aria-controls="prompt-box-move-menu" aria-expanded="false"><i class="fa-solid fa-truck-moving"></i></button></div>
         <footer><span id="prompt-box-hint"></span><span id="prompt-box-status" role="status" aria-live="polite"></span></footer>`;
     const swatches = panel.querySelector("#prompt-box-colors");
     for (const [value, name] of [["", "없음"], ...FOLDER_COLORS]) {
@@ -442,6 +478,17 @@ function createPanel() {
         if (!search.value.trim() && searchQuery) runSearch();
     });
     panel.querySelector("#prompt-box-folder-editor").addEventListener("submit", saveFolder);
+    const renameDialog = panel.querySelector("#prompt-box-rename-dialog");
+    renameDialog.addEventListener("submit", (event) => {
+        event.preventDefault();
+        void renameSelectedPresets();
+    });
+    renameDialog.addEventListener("input", renderRenamePreview);
+    renameDialog.addEventListener("change", (event) => {
+        const option = event.target.dataset.renameOption;
+        if (option) renameOptions[option] = event.target.checked;
+        renderRenamePreview();
+    });
     panel.querySelector("#prompt-box-folder-name-input").addEventListener("input", (event) => event.target.setCustomValidity(""));
     panel.querySelector("#prompt-box-parent-target").addEventListener("keydown", (event) => {
         if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -554,11 +601,11 @@ function render() {
     organize.title = organizing ? "폴더 관리 끝내기" : "폴더 관리";
     organize.setAttribute("aria-label", organize.title);
     panel.querySelector("#prompt-box-new-folder").hidden = !organizing;
-    panel.querySelector("#prompt-box-bulk").hidden = !selectMode;
+    panel.querySelector("#prompt-box-bulk").hidden = !selectMode || organizing;
     panel.querySelector("#prompt-box-select").hidden = selectMode || organizing;
     panel.querySelector("#prompt-box-hint").textContent =
         organizing ? "폴더를 클릭하면 이름, 색상 등을 변경할 수 있습니다. ⋮ 를 잡고 움직여 순서를 바꾸세요."
-        : selectMode ? "프리셋을 골라 다른 폴더로 옮기거나 삭제할 수 있습니다."
+        : selectMode ? "프리셋을 골라 다른 폴더로 옮기거나 이름을 바꾸거나 삭제할 수 있습니다."
         : "이름을 누르면 불러오고, 길게 누르면 여러 개를 골라 옮기거나 삭제할 수 있습니다.";
     renderRows(active, favoriteNames, tree);
     syncSidebar();
@@ -806,6 +853,7 @@ function renderBulk() {
     panel.querySelector("#prompt-box-selected-count").textContent = `${selectedNames.size}개 선택`;
     panel.querySelector("#prompt-box-move").disabled = !selectedNames.size;
     panel.querySelector("#prompt-box-delete-presets").disabled = !selectedNames.size;
+    panel.querySelector("#prompt-box-rename-presets").disabled = !selectedNames.size;
 }
 
 function deletionTargets() {
@@ -864,7 +912,7 @@ async function deleteSelectedPresets() {
     let removed = 0;
     const failed = [];
     for (const [index, name] of names.entries()) {
-        confirm.textContent = `삭제 중… ${index + 1}/${names.length}`;
+        showBusy(dialog, "프리셋 삭제 중…", index + 1, names.length);
         try {
             if (await manager.deletePreset(name)) {
                 removed++;
@@ -877,15 +925,222 @@ async function deleteSelectedPresets() {
         }
     }
     savePromptSettings();
+    hideBusy(dialog);
     deleting = false;
     buttons.forEach((node) => {
         node.disabled = false;
     });
     hideDeleteDialog();
-    selectMode = false;
     selectedNames.clear();
-    panel.querySelector("#prompt-box-status").textContent = failed.length ? `${removed}개 삭제했습니다. ${failed.length}개는 삭제하지 못했습니다.` : `${removed}개 삭제했습니다.`;
+    setStatus(failed.length ? `${removed}개 삭제했습니다. ${failed.length}개는 삭제하지 못했습니다.` : `${removed}개 삭제했습니다.`);
     scheduleRender();
+}
+
+function showBusy(dialog, label, step, total) {
+    const overlay = dialog.querySelector(".prompt-box-busy");
+    if (overlay.hidden) {
+        dialog.scrollTop = 0;
+        dialog.dataset.busy = "true";
+        overlay.hidden = false;
+    }
+    overlay.querySelector(".prompt-box-busy-label").textContent = label;
+    overlay.querySelector(".prompt-box-busy-progress").textContent = `${step} / ${total}`;
+}
+
+function hideBusy(dialog) {
+    dialog.querySelector(".prompt-box-busy").hidden = true;
+    delete dialog.dataset.busy;
+}
+
+function renameDialogOpen() {
+    return !!panel && !panel.querySelector("#prompt-box-rename-dialog").hidden;
+}
+
+function nameKey(name) {
+    return normalized(name).normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+function selectedInOrder() {
+    return getCatalog()
+        .map((item) => item.name)
+        .filter((name) => selectedNames.has(name));
+}
+
+function versionOf(name) {
+    const matches = name.match(VERSION_PATTERN) || [];
+    const prefixed = matches.filter((match) => /^v/i.test(match));
+    return (prefixed.length ? prefixed : matches).at(-1) || "";
+}
+
+function tidyName(text) {
+    let next = text;
+    if (renameOptions.emoji) next = next.replace(EMOJI_PATTERN, "").replace(/[(\[{]\s*[)\]}]/g, "");
+    if (renameOptions.underscore) next = next.replace(/_+/g, " ");
+    return next
+        .replace(UNSAFE_FILENAME, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[. ]+$/, "");
+}
+
+function renamePlan() {
+    const names = selectedInOrder();
+    const title = panel.querySelector("#prompt-box-rename-input").value.replace(/\s+/g, " ").trim();
+    const single = names.length === 1;
+    const reserved = new Set(getCatalog().map((item) => nameKey(item.name)));
+    return names.map((name) => {
+        let base = title || name;
+        if (!single && title && renameOptions.version) {
+            const version = versionOf(name);
+            if (version) base = `${title} ${version}`;
+        }
+        const target = tidyName(base);
+        if (!target || target === name) return {name, target: name, changed: false, empty: !target};
+        const own = nameKey(name);
+        let next = target;
+        for (let count = 2; reserved.has(nameKey(next)) && nameKey(next) !== own; count++) next = `${target} (${count})`;
+        reserved.add(nameKey(next));
+        return {name, target: next, changed: true, numbered: next !== target};
+    });
+}
+
+function openRenameDialog() {
+    const names = selectedInOrder();
+    if (!names.length) return;
+    closeMoveMenu();
+    const single = names.length === 1;
+    const dialog = panel.querySelector("#prompt-box-rename-dialog");
+    dialog.querySelector("#prompt-box-rename-title").textContent = single ? "이름 바꾸기" : `${names.length}개 이름 바꾸기`;
+    dialog.querySelector("#prompt-box-rename-label").textContent = single ? "새 이름" : "공통 이름 (비우면 기존 이름을 정리만 합니다)";
+    const input = dialog.querySelector("#prompt-box-rename-input");
+    input.value = single ? names[0] : "";
+    input.placeholder = single ? "" : "예: 내 프리셋";
+    dialog.querySelector("#prompt-box-rename-version").hidden = single;
+    for (const checkbox of dialog.querySelectorAll("[data-rename-option]")) checkbox.checked = renameOptions[checkbox.dataset.renameOption];
+    dialog.hidden = false;
+    panel.dataset.dialogOpen = "true";
+    renderRenamePreview();
+    if (!isDesktop()) dialog.querySelector('[data-action="cancel-rename"]').focus({preventScroll: true});
+    else {
+        input.focus({preventScroll: true});
+        if (single) input.select();
+    }
+}
+
+function hideRenameDialog(restoreFocus = false) {
+    if (!panel) return;
+    panel.querySelector("#prompt-box-rename-dialog").hidden = true;
+    if (!deleteDialogOpen()) delete panel.dataset.dialogOpen;
+    if (restoreFocus) panel.querySelector("#prompt-box-rename-presets").focus({preventScroll: true});
+}
+
+function renderRenamePreview() {
+    if (!renameDialogOpen() || renaming) return;
+    const plan = renamePlan();
+    const changed = plan.filter((entry) => entry.changed).length;
+    const rows = plan.map((entry) => {
+        const row = element("li", entry.changed ? "" : "prompt-box-rename-same");
+        const before = element("span", "prompt-box-rename-old", entry.name);
+        before.title = entry.name;
+        row.append(before, glyph("fa-arrow-right"));
+        const after = element("span", "prompt-box-rename-new", entry.changed ? entry.target : entry.empty ? "이름이 비어 그대로 둡니다" : "변경 없음");
+        after.title = entry.target;
+        row.append(after);
+        if (entry.numbered) row.append(element("small", "prompt-box-rename-note", "같은 이름이 있어 번호를 붙였습니다"));
+        return row;
+    });
+    panel.querySelector("#prompt-box-rename-preview").replaceChildren(...rows);
+    panel.querySelector("#prompt-box-rename-summary").textContent = `미리보기 · ${changed}개 바뀜`;
+    const confirm = panel.querySelector("#prompt-box-confirm-rename");
+    confirm.disabled = !changed;
+    confirm.textContent = changed ? `${changed}개 바꾸기` : "바꾸기";
+}
+
+async function savePresetCopy(manager, oldName, newName) {
+    const preset = manager.getCompletionPresetByName(oldName);
+    if (!preset) throw new Error(`Preset not found: ${oldName}`);
+    const copy = structuredClone(preset);
+    const response = await fetch("/api/presets/save", {
+        method: "POST",
+        headers: getRequestHeaders(),
+        body: JSON.stringify({preset: copy, name: newName, apiId: "openai"}),
+    });
+    if (!response.ok) throw new Error(`Preset could not be saved: ${newName}`);
+    const {name} = await response.json();
+    const {presets, preset_names} = manager.getPresetList();
+    presets.push(copy);
+    preset_names[name] = presets.length - 1;
+    presetSelect.append(new Option(name, String(presets.length - 1)));
+    if (!(await manager.deletePreset(oldName))) throw new Error(`Preset could not be deleted: ${oldName}`);
+    return name;
+}
+
+async function renamePresetFile(manager, oldName, newName) {
+    const active = oldName === currentName();
+    await eventSource.emit(event_types.PRESET_RENAMED_BEFORE, {apiId: "openai", oldName, newName});
+    if (active) {
+        const extensions = manager.readPresetExtensionField({name: oldName, path: ""});
+        await manager.renamePreset(newName);
+        await manager.writePresetExtensionField({name: newName, path: "", value: extensions});
+    } else newName = await savePresetCopy(manager, oldName, newName);
+    await eventSource.emit(event_types.PRESET_RENAMED, {apiId: "openai", oldName, newName});
+    return {name: newName, active};
+}
+
+async function renameSelectedPresets() {
+    if (renaming) return;
+    const plan = renamePlan().filter((entry) => entry.changed);
+    if (!plan.length) return;
+    const manager = getPresetManager("openai");
+    const dialog = panel.querySelector("#prompt-box-rename-dialog");
+    const confirm = dialog.querySelector("#prompt-box-confirm-rename");
+    if (!manager) {
+        panel.querySelector("#prompt-box-rename-summary").textContent = "프리셋 이름을 바꿀 준비가 되지 않았습니다.";
+        return;
+    }
+    renaming = true;
+    const controls = Array.from(dialog.querySelectorAll("button, input"));
+    controls.forEach((node) => {
+        node.disabled = true;
+    });
+    let renamed = 0;
+    let activeRenamed = false;
+    const failed = [];
+    for (const [index, {name, target}] of plan.entries()) {
+        showBusy(dialog, "이름 바꾸는 중…", index + 1, plan.length);
+        try {
+            const safe = await getSanitizedFilename(target);
+            const taken = getCatalog().some((item) => item.name !== name && nameKey(item.name) === nameKey(safe));
+            if (!safe || safe === name || taken) {
+                failed.push(name);
+                continue;
+            }
+            let from = name;
+            if (nameKey(from) === nameKey(safe)) {
+                const step = await renamePresetFile(manager, from, `${safe} ~${Date.now().toString(36)}`);
+                from = step.name;
+                catalogDirty = true;
+            }
+            const result = await renamePresetFile(manager, from, safe);
+            activeRenamed ||= result.active;
+            catalogDirty = true;
+            renamed++;
+        } catch (error) {
+            console.error("[프롬 정리함] 프리셋 이름 바꾸기 실패", name, error);
+            catalogDirty = true;
+            failed.push(name);
+        }
+    }
+    if (activeRenamed) document.getElementById("update_oai_preset")?.click();
+    controls.forEach((node) => {
+        node.disabled = false;
+    });
+    hideBusy(dialog);
+    renaming = false;
+    hideRenameDialog();
+    selectedNames.clear();
+    setStatus(failed.length ? `${renamed}개 이름을 바꿨습니다. ${failed.length}개는 바꾸지 못했습니다.` : `${renamed}개 이름을 바꿨습니다.`);
+    invalidateCatalog();
 }
 
 function syncParentTarget(tree = folderTree()) {
@@ -1091,9 +1346,8 @@ function moveSelected(target) {
         changed++;
     }
     selectedNames.clear();
-    selectMode = false;
     const destination = target === NONE ? "미분류" : folderTree().paths.get(target);
-    panel.querySelector("#prompt-box-status").textContent = changed ? `${changed}개 → ${destination}` : "이미 그 폴더에 있습니다.";
+    setStatus(changed ? `${changed}개 → ${destination}` : "이미 그 폴더에 있습니다.");
     if (changed) saveState();
     else scheduleRender();
 }
@@ -1106,8 +1360,6 @@ function exitSelectMode() {
 
 function setOrganizing(value) {
     organizing = value;
-    selectMode = false;
-    selectedNames.clear();
     hideFolderEditor();
     scheduleRender();
 }
@@ -1122,7 +1374,7 @@ async function loadPreset(name) {
     }
     const manager = getPresetManager("openai");
     if (!manager) {
-        panel.querySelector("#prompt-box-status").textContent = "프리셋을 불러올 준비가 되지 않았습니다.";
+        setStatus("프리셋을 불러올 준비가 되지 않았습니다.");
         return;
     }
     loading = true;
@@ -1131,9 +1383,9 @@ async function loadPreset(name) {
     try {
         await manager.selectPreset(item.value);
         if (!isDesktop()) closePanel();
-        else panel.querySelector("#prompt-box-status").textContent = "프리셋을 불러왔습니다.";
+        else setStatus("프리셋을 불러왔습니다.");
     } catch (error) {
-        panel.querySelector("#prompt-box-status").textContent = "불러오지 못했습니다. 다시 시도하세요.";
+        setStatus("불러오지 못했습니다. 다시 시도하세요.");
         console.error("[프롬 정리함] 프리셋 불러오기 실패", error);
     } finally {
         loading = false;
@@ -1260,12 +1512,12 @@ function dismissLayer() {
         if (!deleting) hideDeleteDialog(true);
         return true;
     }
-    if (editorOpen()) {
-        hideFolderEditor(true);
+    if (renameDialogOpen()) {
+        if (!renaming) hideRenameDialog(true);
         return true;
     }
-    if (selectMode) {
-        exitSelectMode();
+    if (editorOpen()) {
+        hideFolderEditor(true);
         return true;
     }
     if (organizing) {
@@ -1333,8 +1585,19 @@ function handleClick(event) {
         scheduleRender();
     } else if (action === "favorite") {
         const name = control.dataset.favoriteName;
-        state.favorites = state.favorites.includes(name) ? state.favorites.filter((item) => item !== name) : [...state.favorites, name];
-        saveState();
+        const added = !state.favorites.includes(name);
+        state.favorites = added ? [...state.favorites, name] : state.favorites.filter((item) => item !== name);
+        if (folderId === FAVORITES) {
+            saveState();
+            return;
+        }
+        savePromptSettings();
+        queueNativeSync();
+        control.title = added ? "즐겨찾기 해제" : "즐겨찾기 추가";
+        control.setAttribute("aria-label", `${name} ${control.title}`);
+        control.setAttribute("aria-pressed", String(added));
+        const count = String(getCatalog().filter((item) => state.favorites.includes(item.name)).length);
+        for (const node of panel.querySelectorAll(`[data-folder-id="${FAVORITES}"] .prompt-box-count`)) node.textContent = count;
     } else if (action === "load") void loadPreset(control.dataset.name);
     else if (["page", "previous-page", "next-page"].includes(action)) {
         const requested = action === "page" ? Number(control.dataset.page) : currentPage + (action === "next-page" ? 1 : -1);
@@ -1361,6 +1624,8 @@ function handleClick(event) {
     else if (action === "delete-presets") openDeleteDialog();
     else if (action === "cancel-delete-presets") hideDeleteDialog(true);
     else if (action === "confirm-delete-presets") void deleteSelectedPresets();
+    else if (action === "rename-presets") openRenameDialog();
+    else if (action === "cancel-rename") hideRenameDialog(true);
 }
 
 function syncSidebar() {
@@ -1393,8 +1658,10 @@ function positionPanel() {
     panel.setAttribute("aria-modal", "true");
     syncSidebar();
     if (mobile) {
-        const bottom = (viewport?.height || window.innerHeight) + (viewport?.offsetTop || 0);
-        setPositionStyle(panel, "--prompt-box-available-height", `${Math.max(0, Math.floor(bottom - SHEET_GAP))}px`);
+        const height = Math.floor(viewport?.height || window.innerHeight);
+        const offset = Math.max(0, Math.round(viewport?.offsetTop || 0));
+        setPositionStyle(panel, "--prompt-box-available-height", `${Math.max(0, height - SHEET_GAP)}px`);
+        setPositionStyle(panel, "--prompt-box-viewport-top", `${offset}px`);
         return;
     }
     const left = viewport?.offsetLeft || 0;
@@ -1439,6 +1706,8 @@ function handleOutside(event) {
         if (!moveMenu.contains(event.target) && !menuTrigger().contains(event.target)) closeMoveMenu();
     } else if (event.target === panel && deleteDialogOpen()) {
         if (!deleting) hideDeleteDialog(true);
+    } else if (event.target === panel && renameDialogOpen()) {
+        if (!renaming) hideRenameDialog(true);
     } else if (event.target === panel && editorOpen()) hideFolderEditor();
 }
 
@@ -1446,6 +1715,7 @@ function handleEscape(event) {
     if (event.key === "Tab" && isDesktop() && !moveMenu) {
         const scope =
             deleteDialogOpen() ? panel.querySelector("#prompt-box-delete-dialog")
+            : renameDialogOpen() ? panel.querySelector("#prompt-box-rename-dialog")
             : editorOpen() ? panel.querySelector("#prompt-box-folder-editor")
             : panel;
         const controls = Array.from(scope.querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]')).filter((node) => node.getClientRects().length);
@@ -1468,7 +1738,7 @@ function openPanel() {
     panel.dataset.preparing = "true";
     panel.hidden = false;
     launcher.setAttribute("aria-expanded", "true");
-    panel.querySelector("#prompt-box-status").textContent = "";
+    setStatus("");
     positionPanel();
     searchQuery = panel.querySelector("#prompt-box-search").value.trim();
     const active = currentName();
@@ -1511,6 +1781,7 @@ function closePanel(restoreFocus = true) {
     selectedNames.clear();
     hideFolderEditor();
     hideDeleteDialog();
+    hideRenameDialog();
     document.removeEventListener("pointerdown", handleOutside);
     document.removeEventListener("keydown", handleEscape, true);
     window.removeEventListener("resize", schedulePosition);
