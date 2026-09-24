@@ -600,7 +600,7 @@
     color: var(--prompt-box-muted) !important;
 }
 
-#prompt-box :is(#prompt-box-folder-editor, #prompt-box-delete-dialog, #prompt-box-rename-dialog) {
+#prompt-box :is(#prompt-box-folder-editor, #prompt-box-delete-dialog, #prompt-box-rename-dialog, #prompt-box-memo-dialog) {
     display: flex !important;
     flex-direction: column !important;
     position: absolute !important;
@@ -627,7 +627,7 @@
     inset: 0 !important;
 }
 
-#prompt-box :is(#prompt-box-editor-label, #prompt-box-delete-title, #prompt-box-rename-title) {
+#prompt-box :is(#prompt-box-editor-label, #prompt-box-delete-title, #prompt-box-rename-title, #prompt-box-memo-title) {
     font-size: 14px !important;
 }
 
@@ -818,6 +818,70 @@
     display: none !important;
 }
 
+#prompt-box button[data-action="memo"][data-has-memo="true"],
+#prompt-box button[data-action="memo"][data-has-memo="true"]:hover:not(:disabled) {
+    color: var(--prompt-box-accent) !important;
+}
+
+#prompt-box #prompt-box-memo-dialog {
+    z-index: 8 !important;
+    width: min(460px, calc(100% - 32px)) !important;
+    gap: 10px !important;
+}
+
+#prompt-box #prompt-box-memo-name {
+    color: var(--prompt-box-muted) !important;
+    font-size: 12px !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+}
+
+#prompt-box :is(#prompt-box-memo-view, #prompt-box-memo-input) {
+    width: 100% !important;
+    min-height: 120px !important;
+    max-height: 320px !important;
+    margin: 0 !important;
+    padding: 10px 12px !important;
+    border: 1px solid var(--prompt-box-border) !important;
+    border-radius: 8px !important;
+    color: var(--prompt-box-text) !important;
+    font-family: inherit !important;
+    font-size: 13px !important;
+    line-height: 1.6 !important;
+    overflow-y: auto !important;
+}
+
+#prompt-box #prompt-box-memo-view {
+    background: var(--prompt-box-soft) !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere !important;
+
+    a {
+        color: var(--prompt-box-accent) !important;
+        text-decoration: underline !important;
+    }
+}
+
+#prompt-box #prompt-box-memo-input {
+    background: var(--prompt-box-bg) !important;
+    resize: vertical !important;
+    box-shadow: none !important;
+}
+
+#prompt-box #prompt-box-memo-input:focus-visible {
+    outline: 0 !important;
+    border-color: var(--prompt-box-accent) !important;
+}
+
+#prompt-box :is(#prompt-box-memo-view, #prompt-box-memo-input, #prompt-box-memo-dialog button)[hidden] {
+    display: none !important;
+}
+
+#prompt-box #prompt-box-clear-memo {
+    margin-right: auto !important;
+}
+
 #prompt-box .prompt-box-field-label {
     display: block !important;
     margin: 14px 0 6px !important;
@@ -906,8 +970,8 @@
     box-shadow: 0 0 0 2px var(--prompt-box-soft), 0 0 0 4px var(--prompt-box-text) !important;
 }
 
-#prompt-box button[data-action="favorite"],
-#prompt-box button[data-action="favorite"]:hover:not(:disabled) {
+#prompt-box button:is([data-action="favorite"], [data-action="memo"]),
+#prompt-box button:is([data-action="favorite"], [data-action="memo"]):hover:not(:disabled) {
     border-color: transparent !important;
     background: transparent !important;
     color: var(--prompt-box-muted) !important;
@@ -1105,7 +1169,7 @@
     #prompt-box[data-sheet="true"]:not([hidden]):not([data-preparing="true"]) {
         animation: none !important;
     }
-    #prompt-box :is(#prompt-box-folder-editor, #prompt-box-delete-dialog, #prompt-box-rename-dialog, .prompt-box-dropdown-menu):not([hidden]) {
+    #prompt-box :is(#prompt-box-folder-editor, #prompt-box-delete-dialog, #prompt-box-rename-dialog, #prompt-box-memo-dialog, .prompt-box-dropdown-menu):not([hidden]) {
         animation: none !important;
     }
     #prompt-box[data-sheet="true"]:is([data-editor-open="true"], [data-dialog-open="true"], [data-menu-open="true"])::after {
@@ -1157,7 +1221,7 @@
     #prompt-box .prompt-box-search {
         margin: 4px 10px 8px !important;
     }
-    #prompt-box :is(.prompt-box-search input, #prompt-box-folder-name-input, #prompt-box-rename-input) {
+    #prompt-box :is(.prompt-box-search input, #prompt-box-folder-name-input, #prompt-box-rename-input, #prompt-box-memo-input) {
         font-size: 14px !important;
     }
     #prompt-box #prompt-box-chips {
@@ -1239,7 +1303,7 @@
     #prompt-box[data-organizing="true"] :is(.prompt-box-search, #prompt-box-chips) {
         display: none !important;
     }
-    #prompt-box :is(#prompt-box-folder-editor, #prompt-box-delete-dialog, #prompt-box-rename-dialog) {
+    #prompt-box :is(#prompt-box-folder-editor, #prompt-box-delete-dialog, #prompt-box-rename-dialog, #prompt-box-memo-dialog) {
         top: 50% !important;
         right: 8px !important;
         left: 8px !important;
@@ -1299,7 +1363,7 @@
     #prompt-box .prompt-box-row-meta {
         font-size: 11px !important;
     }
-    #prompt-box button[data-action="favorite"] {
+    #prompt-box button:is([data-action="favorite"], [data-action="memo"]) {
         flex-basis: 30px !important;
         width: 30px !important;
         height: 30px !important;

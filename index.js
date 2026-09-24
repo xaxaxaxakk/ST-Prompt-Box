@@ -67,6 +67,7 @@ let reorder = null;
 let deleting = false;
 let renaming = false;
 let statusTimer = 0;
+let memoName = "";
 
 function getState() {
     let state = extension_settings[KEY];
@@ -76,6 +77,7 @@ function getState() {
     if (!Array.isArray(state.folders)) state.folders = [];
     if (!state.assignments || typeof state.assignments !== "object" || Array.isArray(state.assignments)) state.assignments = {};
     if (!Array.isArray(state.favorites)) state.favorites = [];
+    if (!state.notes || typeof state.notes !== "object" || Array.isArray(state.notes)) state.notes = {};
     if (!Array.isArray(state.collapsed)) state.collapsed = [];
     if (state.theme !== "dark" && state.theme !== "light") state.theme = "light";
     return state;
@@ -159,7 +161,7 @@ function placeSiblings(ids) {
 function captureSettings() {
     const state = getState();
     return {
-        groups: JSON.stringify([state.folders, state.assignments, state.favorites]),
+        groups: JSON.stringify([state.folders, state.assignments, state.favorites, state.notes]),
         view: JSON.stringify([state.collapsed, state.theme]),
     };
 }
@@ -430,6 +432,13 @@ function createPanel() {
             <div class="prompt-box-editor-actions"><button type="button" data-action="cancel-rename">취소</button><button type="submit" id="prompt-box-confirm-rename" class="prompt-box-primary">바꾸기</button></div>
             <div class="prompt-box-busy" role="status" aria-live="polite" hidden><i class="fa-solid fa-spinner fa-spin-pulse" aria-hidden="true"></i><strong class="prompt-box-busy-label"></strong><span class="prompt-box-busy-progress"></span></div>
         </form>
+        <form id="prompt-box-memo-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-box-memo-title" hidden>
+            <strong id="prompt-box-memo-title">메모</strong>
+            <span id="prompt-box-memo-name"></span>
+            <div id="prompt-box-memo-view"></div>
+            <textarea id="prompt-box-memo-input" rows="7" maxlength="4000" spellcheck="false" aria-labelledby="prompt-box-memo-title" placeholder="설명이나 링크를 적어 두세요. http로 시작하는 주소는 누르면 새 창에서 열립니다."></textarea>
+            <div class="prompt-box-editor-actions"><button type="button" data-action="clear-memo" id="prompt-box-clear-memo" class="prompt-box-danger">지우기</button><button type="button" data-action="close-memo" id="prompt-box-close-memo">닫기</button><button type="button" data-action="edit-memo" id="prompt-box-edit-memo" class="prompt-box-primary"><i class="fa-solid fa-pen" aria-hidden="true"></i>편집</button><button type="submit" id="prompt-box-save-memo" class="prompt-box-primary">저장</button></div>
+        </form>
         <div id="prompt-box-bulk" hidden><span id="prompt-box-selected-count"></span><button type="button" data-action="select-results"><i class="fa-solid fa-check-double"></i></button><button type="button" data-action="clear-selection"><i class="fa-solid fa-stop"></i></button><button type="button" data-action="rename-presets" id="prompt-box-rename-presets" title="이름 바꾸기" aria-label="이름 바꾸기"><i class="fa-solid fa-pen" aria-hidden="true"></i></button><button type="button" data-action="delete-presets" id="prompt-box-delete-presets" class="prompt-box-danger"><i class="fa-solid fa-trash-can" aria-hidden="true"></i></button><button type="button" data-action="toggle-target" id="prompt-box-move" class="prompt-box-primary" aria-haspopup="listbox" aria-controls="prompt-box-move-menu" aria-expanded="false"><i class="fa-solid fa-truck-moving"></i></button></div>
         <footer><span id="prompt-box-hint"></span><span id="prompt-box-status" role="status" aria-live="polite"></span></footer>`;
     const swatches = panel.querySelector("#prompt-box-colors");
@@ -484,6 +493,10 @@ function createPanel() {
         void renameSelectedPresets();
     });
     renameDialog.addEventListener("input", renderRenamePreview);
+    panel.querySelector("#prompt-box-memo-dialog").addEventListener("submit", (event) => {
+        event.preventDefault();
+        saveMemo();
+    });
     renameDialog.addEventListener("change", (event) => {
         const option = event.target.dataset.renameOption;
         if (option) renameOptions[option] = event.target.checked;
@@ -819,11 +832,14 @@ function renderRows(active, favoriteNames, tree) {
             entry.setAttribute("aria-busy", "true");
             entry.append(glyph("fa-spinner fa-spin-pulse prompt-box-spinner"));
         }
+        const memo = iconButton("fa-note-sticky", "", "memo");
+        memo.dataset.memoName = item.name;
+        syncMemoButton(memo, Object.hasOwn(state.notes, item.name));
         const favorite = iconButton("fa-star", favoriteNames.has(item.name) ? "즐겨찾기 해제" : "즐겨찾기 추가", "favorite");
         favorite.dataset.favoriteName = item.name;
         favorite.setAttribute("aria-label", `${item.name} ${favorite.title}`);
         favorite.setAttribute("aria-pressed", String(favoriteNames.has(item.name)));
-        row.append(entry, favorite);
+        row.append(entry, memo, favorite);
         fragment.append(row);
     }
     if (!matching.length)
@@ -950,6 +966,111 @@ function showBusy(dialog, label, step, total) {
 function hideBusy(dialog) {
     dialog.querySelector(".prompt-box-busy").hidden = true;
     delete dialog.dataset.busy;
+}
+
+function memoDialogOpen() {
+    return !!panel && !panel.querySelector("#prompt-box-memo-dialog").hidden;
+}
+
+function syncMemoButton(node, hasMemo) {
+    node.dataset.hasMemo = String(hasMemo);
+    node.firstElementChild.className = `${hasMemo ? "fa-solid" : "fa-regular"} fa-note-sticky`;
+    node.title = hasMemo ? "메모 보기" : "메모 추가";
+    node.setAttribute("aria-label", `${node.dataset.memoName} ${node.title}`);
+}
+
+function refreshMemoButton(name) {
+    const hasMemo = Object.hasOwn(getState().notes, name);
+    for (const node of panel.querySelectorAll("#prompt-box-list [data-memo-name]")) {
+        if (node.dataset.memoName === name) syncMemoButton(node, hasMemo);
+    }
+}
+
+function renderMemoText(container, text) {
+    const fragment = document.createDocumentFragment();
+    let last = 0;
+    for (const match of text.matchAll(/https?:\/\/[^\s<>"']+/g)) {
+        const url = match[0].replace(/[),.!?;:\]]+$/, "");
+        fragment.append(text.slice(last, match.index));
+        const link = element("a", "", url);
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        fragment.append(link);
+        last = match.index + url.length;
+    }
+    fragment.append(text.slice(last));
+    container.replaceChildren(fragment);
+}
+
+function setMemoMode(mode) {
+    const dialog = panel.querySelector("#prompt-box-memo-dialog");
+    const note = getState().notes[memoName] || "";
+    const viewing = mode === "view";
+    dialog.dataset.mode = mode;
+    const view = dialog.querySelector("#prompt-box-memo-view");
+    const input = dialog.querySelector("#prompt-box-memo-input");
+    view.hidden = !viewing;
+    input.hidden = viewing;
+    dialog.querySelector("#prompt-box-edit-memo").hidden = !viewing;
+    dialog.querySelector("#prompt-box-save-memo").hidden = viewing;
+    dialog.querySelector("#prompt-box-clear-memo").hidden = !note;
+    dialog.querySelector("#prompt-box-close-memo").textContent = viewing ? "닫기" : "취소";
+    if (viewing) {
+        renderMemoText(view, note);
+        dialog.querySelector("#prompt-box-edit-memo").focus({preventScroll: true});
+        return;
+    }
+    input.value = note;
+    if (isDesktop()) {
+        input.focus({preventScroll: true});
+        input.setSelectionRange(input.value.length, input.value.length);
+    } else dialog.querySelector("#prompt-box-close-memo").focus({preventScroll: true});
+}
+
+function openMemoDialog(name) {
+    closeMoveMenu();
+    memoName = name;
+    const dialog = panel.querySelector("#prompt-box-memo-dialog");
+    const label = dialog.querySelector("#prompt-box-memo-name");
+    label.textContent = name;
+    label.title = name;
+    dialog.hidden = false;
+    panel.dataset.dialogOpen = "true";
+    setMemoMode(Object.hasOwn(getState().notes, name) ? "view" : "edit");
+}
+
+function hideMemoDialog(restoreFocus = false) {
+    if (!panel) return;
+    const name = memoName;
+    memoName = "";
+    panel.querySelector("#prompt-box-memo-dialog").hidden = true;
+    delete panel.dataset.dialogOpen;
+    if (!restoreFocus) return;
+    Array.from(panel.querySelectorAll("#prompt-box-list [data-memo-name]"))
+        .find((node) => node.dataset.memoName === name)
+        ?.focus({preventScroll: true});
+}
+
+function writeMemo(text) {
+    const notes = getState().notes;
+    if (text) Object.defineProperty(notes, memoName, {value: text, enumerable: true, configurable: true, writable: true});
+    else delete notes[memoName];
+    savePromptSettings();
+    refreshMemoButton(memoName);
+}
+
+function saveMemo() {
+    if (!memoName) return;
+    const text = panel.querySelector("#prompt-box-memo-input").value.trim();
+    writeMemo(text);
+    if (text) setMemoMode("view");
+    else hideMemoDialog(true);
+}
+
+function cancelMemo() {
+    if (panel.querySelector("#prompt-box-memo-dialog").dataset.mode === "edit" && Object.hasOwn(getState().notes, memoName)) setMemoMode("view");
+    else hideMemoDialog(true);
 }
 
 function renameDialogOpen() {
@@ -1516,6 +1637,10 @@ function dismissLayer() {
         if (!renaming) hideRenameDialog(true);
         return true;
     }
+    if (memoDialogOpen()) {
+        cancelMemo();
+        return true;
+    }
     if (editorOpen()) {
         hideFolderEditor(true);
         return true;
@@ -1625,6 +1750,13 @@ function handleClick(event) {
     else if (action === "cancel-delete-presets") hideDeleteDialog(true);
     else if (action === "confirm-delete-presets") void deleteSelectedPresets();
     else if (action === "rename-presets") openRenameDialog();
+    else if (action === "memo") openMemoDialog(control.dataset.memoName);
+    else if (action === "edit-memo") setMemoMode("edit");
+    else if (action === "close-memo") cancelMemo();
+    else if (action === "clear-memo") {
+        writeMemo("");
+        hideMemoDialog(true);
+    }
     else if (action === "cancel-rename") hideRenameDialog(true);
 }
 
@@ -1706,6 +1838,8 @@ function handleOutside(event) {
         if (!moveMenu.contains(event.target) && !menuTrigger().contains(event.target)) closeMoveMenu();
     } else if (event.target === panel && deleteDialogOpen()) {
         if (!deleting) hideDeleteDialog(true);
+    } else if (event.target === panel && memoDialogOpen()) {
+        hideMemoDialog(true);
     } else if (event.target === panel && renameDialogOpen()) {
         if (!renaming) hideRenameDialog(true);
     } else if (event.target === panel && editorOpen()) hideFolderEditor();
@@ -1716,6 +1850,7 @@ function handleEscape(event) {
         const scope =
             deleteDialogOpen() ? panel.querySelector("#prompt-box-delete-dialog")
             : renameDialogOpen() ? panel.querySelector("#prompt-box-rename-dialog")
+            : memoDialogOpen() ? panel.querySelector("#prompt-box-memo-dialog")
             : editorOpen() ? panel.querySelector("#prompt-box-folder-editor")
             : panel;
         const controls = Array.from(scope.querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]')).filter((node) => node.getClientRects().length);
@@ -1782,6 +1917,7 @@ function closePanel(restoreFocus = true) {
     hideFolderEditor();
     hideDeleteDialog();
     hideRenameDialog();
+    hideMemoDialog();
     document.removeEventListener("pointerdown", handleOutside);
     document.removeEventListener("keydown", handleEscape, true);
     window.removeEventListener("resize", schedulePosition);
@@ -1880,6 +2016,11 @@ function initialize() {
             delete state.assignments[oldName];
             changed = true;
         }
+        if (Object.hasOwn(state.notes, oldName)) {
+            Object.defineProperty(state.notes, newName, {value: state.notes[oldName], enumerable: true, writable: true, configurable: true});
+            delete state.notes[oldName];
+            changed = true;
+        }
         if (state.favorites.includes(oldName)) {
             state.favorites = [...new Set(state.favorites.map((name) => (name === oldName ? newName : name)))];
             changed = true;
@@ -1891,8 +2032,9 @@ function initialize() {
     on(event_types.PRESET_DELETED, ({apiId, name}) => {
         if (apiId !== "openai") return;
         const state = getState();
-        const changed = Object.hasOwn(state.assignments, name) || state.favorites.includes(name);
+        const changed = Object.hasOwn(state.assignments, name) || state.favorites.includes(name) || Object.hasOwn(state.notes, name);
         delete state.assignments[name];
+        delete state.notes[name];
         state.favorites = state.favorites.filter((item) => item !== name);
         selectedNames.delete(name);
         invalidateCatalog();
