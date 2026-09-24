@@ -68,6 +68,7 @@ let deleting = false;
 let renaming = false;
 let statusTimer = 0;
 let memoName = "";
+let editFromHeader = false;
 
 function getState() {
     let state = extension_settings[KEY];
@@ -391,7 +392,7 @@ function createPanel() {
                 <button type="button" data-action="new-folder" id="prompt-box-new-folder" hidden><i class="fa-solid fa-plus" aria-hidden="true"></i><span>새 폴더</span></button>
             </aside>
             <main class="prompt-box-content">
-                <div class="prompt-box-list-header"><strong id="prompt-box-folder-name"></strong><span id="prompt-box-result-count"></span><button type="button" data-action="select" id="prompt-box-select" class="prompt-box-icon" title="여러 개 골라서 이동·이름 변경·삭제" aria-label="여러 개 골라서 이동·이름 변경·삭제"><i class="fa-solid fa-list-check" aria-hidden="true"></i></button></div>
+                <div class="prompt-box-list-header"><strong id="prompt-box-folder-name"></strong><a id="prompt-box-folder-link" class="prompt-box-icon" target="_blank" rel="noopener noreferrer" hidden><i class="fa-solid fa-link" aria-hidden="true"></i></a><span id="prompt-box-result-count"></span><button type="button" data-action="edit-folder-info" id="prompt-box-folder-info-edit" class="prompt-box-icon" hidden><i class="fa-solid fa-pen" aria-hidden="true"></i></button><button type="button" data-action="select" id="prompt-box-select" class="prompt-box-icon" title="여러 개 골라서 이동·이름 변경·삭제" aria-label="여러 개 골라서 이동·이름 변경·삭제"><i class="fa-solid fa-list-check" aria-hidden="true"></i></button><p id="prompt-box-folder-note" hidden></p></div>
                 <div id="prompt-box-list" aria-label="프리셋 목록"></div>
                 <nav id="prompt-box-pagination" aria-label="프리셋 페이지">
                     <button type="button" data-action="previous-page" aria-label="이전 페이지"><i class="fa-solid fa-chevron-left" aria-hidden="true"></i></button>
@@ -407,6 +408,10 @@ function createPanel() {
             <label for="prompt-box-parent-target" class="prompt-box-field-label">상위폴더</label>
             <div class="prompt-box-dropdown"><button type="button" id="prompt-box-parent-target" data-action="toggle-parent" aria-label="상위폴더" aria-haspopup="listbox" aria-controls="prompt-box-parent-menu" aria-expanded="false"><span>최상위</span><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></button></div>
             <div id="prompt-box-color-field"><span class="prompt-box-field-label" id="prompt-box-color-label">색상</span><div id="prompt-box-colors" role="radiogroup" aria-labelledby="prompt-box-color-label"></div></div>
+            <label for="prompt-box-folder-note-input" class="prompt-box-field-label">설명</label>
+            <textarea id="prompt-box-folder-note-input" rows="3" maxlength="500" spellcheck="false" placeholder="이 폴더에 대한 간단한 설명"></textarea>
+            <label for="prompt-box-folder-link-input" class="prompt-box-field-label">링크</label>
+            <input id="prompt-box-folder-link-input" inputmode="url" maxlength="2000" autocomplete="off" spellcheck="false" placeholder="https://">
             <div class="prompt-box-editor-actions"><button type="button" data-action="delete-folder" id="prompt-box-delete-folder" class="prompt-box-danger">삭제</button><button type="button" data-action="cancel-folder">취소</button><button type="submit" class="prompt-box-primary">저장</button></div>
             <div id="prompt-box-delete-confirm" hidden><span>이 폴더와 하위폴더를 삭제합니다. 안의 프리셋은 모두 미분류로 옮겨집니다.</span><div class="prompt-box-inline"><button type="button" data-action="confirm-delete" class="prompt-box-danger">폴더 삭제</button><button type="button" data-action="cancel-delete">취소</button></div></div>
         </form>
@@ -503,6 +508,7 @@ function createPanel() {
         renderRenamePreview();
     });
     panel.querySelector("#prompt-box-folder-name-input").addEventListener("input", (event) => event.target.setCustomValidity(""));
+    panel.querySelector("#prompt-box-folder-link-input").addEventListener("input", (event) => event.target.setCustomValidity(""));
     panel.querySelector("#prompt-box-parent-target").addEventListener("keydown", (event) => {
         if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
         event.preventDefault();
@@ -609,6 +615,7 @@ function render() {
             ?.focus({preventScroll: true});
     }
     panel.querySelector("#prompt-box-folder-name").textContent = tree.paths.get(folderId) || views.find((view) => view.id === folderId)?.name || "전체";
+    renderFolderInfo(tree.byId.get(folderId));
     const organize = panel.querySelector("#prompt-box-organize");
     organize.setAttribute("aria-pressed", String(organizing));
     organize.title = organizing ? "폴더 관리 끝내기" : "폴더 관리";
@@ -623,6 +630,34 @@ function render() {
     renderRows(active, favoriteNames, tree);
     syncSidebar();
     renderBulk();
+}
+
+function renderFolderInfo(folder) {
+    const note = panel.querySelector("#prompt-box-folder-note");
+    note.textContent = folder?.note || "";
+    note.hidden = !folder?.note;
+    const link = panel.querySelector("#prompt-box-folder-link");
+    link.hidden = !folder?.link;
+    if (folder?.link) {
+        link.href = folder.link;
+        link.title = folder.link;
+        link.setAttribute("aria-label", `${folder.name} 링크 새 창에서 열기`);
+    } else link.removeAttribute("href");
+    const edit = panel.querySelector("#prompt-box-folder-info-edit");
+    edit.hidden = !folder || organizing;
+    edit.title = folder?.note || folder?.link ? "설명·링크 편집" : "설명·링크 추가";
+    edit.setAttribute("aria-label", folder ? `${folder.name} ${edit.title}` : edit.title);
+}
+
+function folderLink(text) {
+    const value = text.trim();
+    if (!value) return "";
+    try {
+        const url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(value) ? value : `https://${value}`);
+        return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+    } catch {
+        return null;
+    }
 }
 
 function folderRow(view, tree) {
@@ -1384,13 +1419,20 @@ function hideFolderEditor(restoreFocus = false) {
     editor.hidden = true;
     panel.querySelector("#prompt-box-delete-confirm").hidden = true;
     delete panel.dataset.editorOpen;
+    const fromHeader = editFromHeader;
+    editFromHeader = false;
     if (!restoreFocus) return;
+    if (fromHeader) {
+        panel.querySelector("#prompt-box-folder-info-edit").focus({preventScroll: true});
+        return;
+    }
     const row = editedId && Array.from(panel.querySelectorAll("#prompt-box-folders .prompt-box-folder")).find((node) => node.dataset.folderId === editedId);
     (row || panel.querySelector(organizing ? "#prompt-box-new-folder" : "#prompt-box-organize"))?.focus({preventScroll: true});
 }
 
-function editFolder(id) {
+function editFolder(id, fromHeader = false) {
     closeMoveMenu();
+    editFromHeader = fromHeader;
     folderEditId = id;
     const tree = folderTree();
     parentTarget = id ? tree.parents.get(id) || "" : "";
@@ -1400,13 +1442,21 @@ function editFolder(id) {
     const input = panel.querySelector("#prompt-box-folder-name-input");
     input.value = tree.byId.get(id)?.name || "";
     input.setCustomValidity("");
+    panel.querySelector("#prompt-box-folder-note-input").value = tree.byId.get(id)?.note || "";
+    const linkInput = panel.querySelector("#prompt-box-folder-link-input");
+    linkInput.value = tree.byId.get(id)?.link || "";
+    linkInput.setCustomValidity("");
     panel.querySelector("#prompt-box-delete-folder").hidden = !id;
     panel.querySelector("#prompt-box-delete-confirm").hidden = true;
     panel.querySelector("#prompt-box-folder-editor").hidden = false;
     panel.dataset.editorOpen = "true";
     panel.querySelector("#prompt-box-folder-editor").scrollTop = 0;
-    if (!isDesktop()) panel.querySelector("#prompt-box-parent-target").focus({preventScroll: true});
-    else {
+    if (!isDesktop()) panel.querySelector(fromHeader ? '[data-action="cancel-folder"]' : "#prompt-box-parent-target").focus({preventScroll: true});
+    else if (fromHeader) {
+        const note = panel.querySelector("#prompt-box-folder-note-input");
+        note.focus({preventScroll: true});
+        note.setSelectionRange(note.value.length, note.value.length);
+    } else {
         input.focus({preventScroll: true});
         input.select();
     }
@@ -1427,22 +1477,37 @@ function saveFolder(event) {
         input.reportValidity();
         return;
     }
+    const linkInput = panel.querySelector("#prompt-box-folder-link-input");
+    const link = folderLink(linkInput.value);
+    if (link === null) {
+        linkInput.setCustomValidity("http 또는 https 주소를 입력하세요.");
+        linkInput.reportValidity();
+        return;
+    }
+    const note = panel.querySelector("#prompt-box-folder-note-input").value.trim();
     const color = parentTarget ? "" : editColor;
     const state = getState();
+    const applyInfo = (folder) => {
+        if (color) folder.color = color;
+        else delete folder.color;
+        if (note) folder.note = note;
+        else delete folder.note;
+        if (link) folder.link = link;
+        else delete folder.link;
+    };
     if (folderEditId) {
         const folder = state.folders.find((folder) => folder.id === folderEditId);
         if (!folder) return;
-        if (folder.name === name && tree.parents.get(folder.id) === parentTarget && colorOf(folder) === color) {
+        if (folder.name === name && tree.parents.get(folder.id) === parentTarget && colorOf(folder) === color && (folder.note || "") === note && (folder.link || "") === link) {
             hideFolderEditor(true);
             return;
         }
         folder.name = name;
         folder.parentId = parentTarget;
-        if (color) folder.color = color;
-        else delete folder.color;
+        applyInfo(folder);
     } else {
         const folder = {id: globalThis.crypto?.randomUUID?.() || `folder_${Date.now()}_${Math.random().toString(36).slice(2)}`, name, parentId: parentTarget};
-        if (color) folder.color = color;
+        applyInfo(folder);
         state.folders.push(folder);
         if (parentTarget) state.collapsed = state.collapsed.filter((id) => id !== parentTarget);
     }
@@ -1731,6 +1796,9 @@ function handleClick(event) {
         scrollResetPending = true;
         scheduleRender("rows");
     } else if (action === "new-folder") editFolder(null);
+    else if (action === "edit-folder-info") {
+        if (folderTree().byId.has(folderId)) editFolder(folderId, true);
+    }
     else if (action === "cancel-folder") hideFolderEditor(true);
     else if (action === "delete-folder") panel.querySelector("#prompt-box-delete-confirm").hidden = false;
     else if (action === "cancel-delete") panel.querySelector("#prompt-box-delete-confirm").hidden = true;

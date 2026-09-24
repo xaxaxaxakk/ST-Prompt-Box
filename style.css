@@ -453,6 +453,64 @@
     flex-shrink: 0 !important;
 }
 
+#prompt-box #prompt-box-folder-link {
+    flex-basis: 24px !important;
+    width: 24px !important;
+    height: 24px !important;
+    color: var(--prompt-box-accent) !important;
+    font-size: 11px !important;
+    text-decoration: none !important;
+}
+
+#prompt-box #prompt-box-folder-link:hover {
+    background: var(--prompt-box-accent-soft) !important;
+    border-radius: 7px !important;
+}
+
+#prompt-box #prompt-box-folder-info-edit {
+    flex-basis: 24px !important;
+    width: 24px !important;
+    height: 24px !important;
+    font-size: 11px !important;
+    opacity: 0.4 !important;
+}
+
+#prompt-box #prompt-box-folder-info-edit[hidden],
+#prompt-box #prompt-box-folder-link[hidden],
+#prompt-box #prompt-box-folder-note[hidden] {
+    display: none !important;
+}
+
+#prompt-box #prompt-box-folder-note {
+    flex: 1 0 100% !important;
+    margin: 0 !important;
+    color: var(--prompt-box-muted) !important;
+    font-size: 12px !important;
+    line-height: 1.5 !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere !important;
+}
+
+#prompt-box #prompt-box-folder-note-input {
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 7px 8px !important;
+    border: 1px solid var(--prompt-box-border) !important;
+    border-radius: 7px !important;
+    background: var(--prompt-box-bg) !important;
+    color: var(--prompt-box-text) !important;
+    font-family: inherit !important;
+    font-size: 13px !important;
+    line-height: 1.5 !important;
+    resize: vertical !important;
+    box-shadow: none !important;
+}
+
+#prompt-box #prompt-box-folder-note-input:focus-visible {
+    outline: 0 !important;
+    border-color: var(--prompt-box-accent) !important;
+}
+
 #prompt-box #prompt-box-result-count {
     color: var(--prompt-box-muted) !important;
     font-size: 11px !important;
@@ -1221,7 +1279,7 @@
     #prompt-box .prompt-box-search {
         margin: 4px 10px 8px !important;
     }
-    #prompt-box :is(.prompt-box-search input, #prompt-box-folder-name-input, #prompt-box-rename-input, #prompt-box-memo-input) {
+    #prompt-box :is(.prompt-box-search input, #prompt-box-folder-name-input, #prompt-box-folder-note-input, #prompt-box-folder-link-input, #prompt-box-rename-input, #prompt-box-memo-input) {
         font-size: 14px !important;
     }
     #prompt-box #prompt-box-chips {
