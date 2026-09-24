@@ -1045,6 +1045,14 @@
     color: #e8c56c !important;
 }
 
+#prompt-box button:is([data-action="favorite"], [data-action="memo"]) {
+    opacity: 0.4 !important;
+}
+
+#prompt-box button:is([data-action="favorite"][aria-pressed="true"], [data-action="memo"][data-has-memo="true"]) {
+    opacity: 1 !important;
+}
+
 #prompt-box #prompt-box-bulk {
     display: flex !important;
     flex: 0 0 auto !important;
