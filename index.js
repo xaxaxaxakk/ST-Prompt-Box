@@ -7,6 +7,7 @@ const KEY = "prompt-box";
 const ALL = "__all__";
 const NONE = "__uncategorized__";
 const FAVORITES = "__favorites__";
+const DIRECT = "__direct__:";
 const PAGE_SIZE = 20;
 const LONG_PRESS_MS = 450;
 const SHEET_GAP = 24;
@@ -28,7 +29,6 @@ const VERSION_PATTERN = /(?<![\p{L}\p{N}.])(?:(?:ver\.?|v)\d+(?:\.\d+)*|\d+(?:\.
 const UNSAFE_FILENAME = /[\/\\?<>:*|"\u0000-\u001f\u0080-\u009f]/g;
 const renameOptions = {emoji: false, underscore: false, version: true};
 const selectedNames = new Set();
-let nativeSyncPending = false;
 let catalog = [];
 let catalogDirty = true;
 let folderId = ALL;
@@ -40,10 +40,11 @@ let panel;
 let backdrop;
 let launcher;
 let presetSelect;
-let selectObserver;
-let placementObserver;
-let observedParent;
-let bootObserver;
+let bar;
+let barDirty = false;
+let nativeFilter = ALL;
+let nativeFiltered = false;
+let parked = [];
 let renderFrame = 0;
 let positionFrame = 0;
 let fullRenderPending = false;
@@ -179,48 +180,71 @@ function handleSettingsUpdated() {
     const groupsChanged = next.groups !== settingsSnapshot?.groups;
     const viewChanged = next.view !== settingsSnapshot?.view;
     settingsSnapshot = next;
-    if (groupsChanged) queueNativeSync();
+    if (groupsChanged) refreshBar();
     if (groupsChanged || viewChanged || presetSelect !== previousSelect) scheduleRender();
 }
 
 function saveState() {
     savePromptSettings();
-    queueNativeSync();
+    refreshBar();
     scheduleRender();
 }
 
-function queueNativeSync() {
-    if (nativeSyncPending) return;
-    nativeSyncPending = true;
-    queueMicrotask(() => {
-        nativeSyncPending = false;
-        if (document.activeElement !== presetSelect) syncNativeGroups();
-    });
+function prepareNative() {
+    syncNativeGroups(nativeFilter);
 }
 
-function observePresetSelect() {
-    selectObserver.observe(presetSelect, {childList: true, subtree: true, characterData: true});
+function restoreNative() {
+    if (nativeFiltered) syncNativeGroups(ALL);
 }
 
-function syncNativeGroups() {
+function assignedFolder(name, state, tree) {
+    return Object.hasOwn(state.assignments, name) && tree.byId.has(state.assignments[name]) ? state.assignments[name] : NONE;
+}
+
+function filterMatcher(filter, state, tree) {
+    if (filter === ALL) return null;
+    if (filter === FAVORITES) {
+        const favorites = new Set(state.favorites);
+        return (name) => favorites.has(name);
+    }
+    if (filter === NONE) return (name) => assignedFolder(name, state, tree) === NONE;
+    const scope = filter.startsWith(DIRECT) ? new Set([filter.slice(DIRECT.length)]) : folderScope(filter, tree);
+    return (name) => scope.has(assignedFolder(name, state, tree));
+}
+
+function syncNativeGroups(filter = ALL) {
     if (!presetSelect?.isConnected) return;
     const state = getState();
     const tree = folderTree();
-    const favorites = new Set(state.favorites);
+    if (!validFilter(filter, tree)) filter = ALL;
+    const matches = filterMatcher(filter, state, tree);
+    const favorites = filter === ALL || filter === FAVORITES ? new Set(state.favorites) : new Set();
     const favoriteGroup = {name: "★ 즐겨찾기", color: FAVORITE_COLOR, options: []};
     const groups = new Map(tree.ordered.map((folder) => [folder.id, {name: tree.paths.get(folder.id), color: folderColor(folder.id, tree), options: []}]));
     groups.set(NONE, {name: "미분류", color: "", options: []});
-    for (const option of presetSelect.options) {
+    const selected = presetSelect.selectedOptions[0];
+    const live = new Set(Array.from(presetSelect.options, (option) => option.value));
+    const options = [...presetSelect.options, ...parked.filter((option) => !live.has(option.value))];
+    parked = [];
+    let outsider = null;
+    for (const option of options) {
         const name = option.textContent.trim();
+        if (matches && !matches(name)) {
+            if (option === selected) outsider = option;
+            else parked.push(option);
+            continue;
+        }
         if (favorites.has(name)) {
             favoriteGroup.options.push(option);
             continue;
         }
-        const assigned = Object.hasOwn(state.assignments, name) ? state.assignments[name] : NONE;
-        (groups.get(assigned) || groups.get(NONE)).options.push(option);
+        (groups.get(assignedFolder(name, state, tree)) || groups.get(NONE)).options.push(option);
     }
+    nativeFiltered = !!matches;
     const desired = [favoriteGroup, ...groups.values()].filter((group) => group.options.length);
     for (const group of desired) group.options.sort((a, b) => presetOrder.compare(a.textContent, b.textContent));
+    if (outsider) desired.push({name: "(현재 사용 중)", color: "", options: [outsider]});
     const existing = Array.from(presetSelect.children);
     const sameStructure =
         existing.length === desired.length &&
@@ -228,35 +252,162 @@ function syncNativeGroups() {
             const node = existing[index];
             return node.tagName === "OPTGROUP" && node.label === group.name && node.children.length === group.options.length && group.options.every((option, i) => node.children[i] === option);
         });
-    const selected = presetSelect.selectedOptions[0];
-    selectObserver.disconnect();
-    try {
-        for (const group of desired) {
-            for (const option of group.options) {
-                if (option.hasAttribute("label")) option.removeAttribute("label");
-            }
+    for (const group of desired) {
+        for (const option of group.options) {
+            if (option.hasAttribute("label")) option.removeAttribute("label");
         }
-        if (!sameStructure) {
-            const fragment = document.createDocumentFragment();
-            for (const group of desired) {
-                const node = document.createElement("optgroup");
-                node.label = group.name;
-                node.append(...group.options);
-                fragment.append(node);
-            }
-            presetSelect.replaceChildren(fragment);
-            if (selected) selected.selected = true;
-            else presetSelect.selectedIndex = -1;
-            catalogDirty = true;
-        }
-        desired.forEach((group, index) => {
-            const node = presetSelect.children[index];
-            if (group.color) node.style.setProperty("color", group.color);
-            else node.style.removeProperty("color");
-        });
-    } finally {
-        observePresetSelect();
     }
+    if (!sameStructure) {
+        const fragment = document.createDocumentFragment();
+        for (const group of desired) {
+            const node = document.createElement("optgroup");
+            node.label = group.name;
+            node.append(...group.options);
+            fragment.append(node);
+        }
+        presetSelect.replaceChildren(fragment);
+        if (selected) selected.selected = true;
+        else presetSelect.selectedIndex = -1;
+    }
+    desired.forEach((group, index) => {
+        const node = presetSelect.children[index];
+        if (group.color) node.style.setProperty("color", group.color);
+        else node.style.removeProperty("color");
+    });
+}
+
+function validFilter(filter, tree) {
+    if ([ALL, NONE, FAVORITES].includes(filter)) return true;
+    return tree.byId.has(filter.startsWith(DIRECT) ? filter.slice(DIRECT.length) : filter);
+}
+
+function refreshBar() {
+    if (isOpen()) barDirty = true;
+    else renderBar();
+}
+
+function barChip(filter, label, options = {}) {
+    const node = element("button", "prompt-box-bar-chip");
+    node.type = "button";
+    node.dataset.filter = filter;
+    node.title = options.title || label;
+    node.setAttribute("aria-pressed", String(filter === nativeFilter));
+    if (options.within) node.classList.add("prompt-box-bar-within");
+    if (options.icon) node.append(glyph(options.icon));
+    if (options.color) {
+        const dot = element("span", "prompt-box-bar-dot");
+        applyColor(dot, options.color);
+        node.append(dot);
+    }
+    node.append(element("span", "", label));
+    return node;
+}
+
+function barArrow(direction) {
+    const node = element("button", "prompt-box-bar-arrow");
+    node.type = "button";
+    node.tabIndex = -1;
+    node.dataset.scroll = String(direction);
+    node.setAttribute("aria-label", direction < 0 ? "왼쪽으로 넘기기" : "오른쪽으로 넘기기");
+    node.append(glyph(direction < 0 ? "fa-chevron-left" : "fa-chevron-right"));
+    return node;
+}
+
+function barRow(key, chips, color) {
+    const row = element("div", "prompt-box-bar-row");
+    row.dataset.key = key;
+    applyColor(row, color);
+    const track = element("div", "prompt-box-bar-track");
+    track.append(...chips);
+    row.append(barArrow(-1), track, barArrow(1));
+    return row;
+}
+
+function syncArrows(row) {
+    const track = row.querySelector(".prompt-box-bar-track");
+    row.dataset.prev = String(track.scrollLeft > 1);
+    row.dataset.next = String(track.scrollLeft + track.clientWidth < track.scrollWidth - 1);
+}
+
+function renderBar() {
+    barDirty = false;
+    if (!bar) return;
+    const tree = folderTree();
+    if (!validFilter(nativeFilter, tree)) nativeFilter = ALL;
+    const activeId = nativeFilter.startsWith(DIRECT) ? nativeFilter.slice(DIRECT.length) : nativeFilter;
+    const currentRoot = tree.roots.get(activeId);
+    const top = [barChip(ALL, "전체", {icon: "fa-layer-group"}), barChip(FAVORITES, "즐겨찾기", {icon: "fa-star"}), barChip(NONE, "미분류", {icon: "fa-inbox"})];
+    for (const root of tree.children.get("")) top.push(barChip(root.id, root.name, {color: colorOf(root), within: currentRoot === root.id}));
+    const rows = [barRow("top", top)];
+    if (currentRoot && tree.children.get(currentRoot).length) {
+        const sub = [barChip(currentRoot, "모두", {title: `${tree.paths.get(currentRoot)} 전체`})];
+        const rest = (folder, label) => sub.push(barChip(DIRECT + folder.id, label, {icon: "fa-inbox", title: `${tree.paths.get(folder.id)} · 하위폴더에 넣지 않은 프리셋`}));
+        rest(tree.byId.get(currentRoot), "나머지");
+        for (const folder of tree.ordered) {
+            if (folder.id === currentRoot || tree.roots.get(folder.id) !== currentRoot) continue;
+            const label = tree.parts.get(folder.id).slice(1).join(" › ");
+            sub.push(barChip(folder.id, label, {title: tree.paths.get(folder.id)}));
+            if (tree.children.get(folder.id).length) rest(folder, `${label} › 나머지`);
+        }
+        rows.push(barRow(`sub:${currentRoot}`, sub, colorOf(tree.byId.get(currentRoot))));
+    }
+    const previous = new Map(Array.from(bar.children, (row) => [row.dataset.key, row.querySelector(".prompt-box-bar-track").scrollLeft]));
+    bar.replaceChildren(...rows);
+    for (const row of rows) {
+        const track = row.querySelector(".prompt-box-bar-track");
+        if (previous.has(row.dataset.key)) track.scrollLeft = previous.get(row.dataset.key);
+        const active = track.querySelector('[aria-pressed="true"], .prompt-box-bar-within');
+        if (active) {
+            if (active.offsetLeft < track.scrollLeft) track.scrollLeft = active.offsetLeft - 24;
+            else if (active.offsetLeft + active.offsetWidth > track.scrollLeft + track.clientWidth) track.scrollLeft = active.offsetLeft + active.offsetWidth - track.clientWidth + 24;
+        }
+        syncArrows(row);
+    }
+}
+
+function chooseFilter(filter) {
+    nativeFilter = filter;
+    renderBar();
+}
+
+function createBar() {
+    bar = element("div");
+    bar.id = "prompt-box-bar";
+    bar.setAttribute("role", "toolbar");
+    bar.setAttribute("aria-label", "프리셋 폴더");
+    bar.addEventListener("click", (event) => {
+        const arrow = event.target.closest("[data-scroll]");
+        if (arrow) {
+            const track = arrow.parentElement.querySelector(".prompt-box-bar-track");
+            track.scrollBy({left: Number(arrow.dataset.scroll) * track.clientWidth * 0.8, behavior: "smooth"});
+            return;
+        }
+        const chip = event.target.closest("[data-filter]");
+        if (chip) chooseFilter(chip.dataset.filter);
+    });
+    bar.addEventListener(
+        "scroll",
+        (event) => {
+            if (event.target.classList?.contains("prompt-box-bar-track")) syncArrows(event.target.parentElement);
+        },
+        {capture: true, passive: true},
+    );
+    bar.addEventListener("pointerenter", () => {
+        for (const row of bar.children) syncArrows(row);
+    });
+    bar.addEventListener(
+        "wheel",
+        (event) => {
+            const track = event.target.closest(".prompt-box-bar-track");
+            if (!track || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+            const room = event.deltaY < 0 ? track.scrollLeft : track.scrollWidth - track.clientWidth - track.scrollLeft;
+            if (room <= 1) return;
+            event.preventDefault();
+            track.scrollLeft += event.deltaY;
+        },
+        {passive: false},
+    );
+    renderBar();
 }
 
 function isOpen() {
@@ -284,6 +435,7 @@ function normalized(text) {
 }
 
 function getCatalog() {
+    restoreNative();
     if (catalogDirty) {
         catalog = Array.from(presetSelect?.options || [], (option) => ({
             name: option.textContent.trim(),
@@ -324,7 +476,6 @@ function scheduleRender(scope = "all") {
 
 function invalidateCatalog() {
     catalogDirty = true;
-    queueNativeSync();
     scheduleRender();
 }
 
@@ -553,20 +704,17 @@ function runSearch() {
 }
 
 function filteredCatalog(tree = folderTree()) {
-    const state = getState();
-    const validIds = tree.byId;
-    const scope = folderScope(folderId, tree);
-    const favorites = new Set(state.favorites);
+    const matches = filterMatcher(folderId, getState(), tree);
     const terms = normalized(searchQuery).split(/\s+/).filter(Boolean);
-    return getCatalog().filter((item) => {
-        const assigned = Object.hasOwn(state.assignments, item.name) && validIds.has(state.assignments[item.name]) ? state.assignments[item.name] : NONE;
-        const included =
-            folderId === ALL ||
-            (folderId === FAVORITES ? favorites.has(item.name)
-            : folderId === NONE ? assigned === NONE
-            : scope.has(assigned));
-        return included && terms.every((term) => item.search.includes(term));
-    });
+    return getCatalog().filter((item) => (!matches || matches(item.name)) && terms.every((term) => item.search.includes(term)));
+}
+
+function filterFolder(filter) {
+    return filter.startsWith(DIRECT) ? filter.slice(DIRECT.length) : filter;
+}
+
+function restView(folder, tree, counts, name = "나머지") {
+    return {id: DIRECT + folder.id, name, count: counts.get(DIRECT + folder.id), icon: "fa-inbox", rest: true, title: `${tree.paths.get(folder.id)} · 하위폴더에 넣지 않은 프리셋`};
 }
 
 function render() {
@@ -579,7 +727,7 @@ function render() {
     applyTheme();
     const tree = folderTree();
     renderedTree = tree;
-    if (![ALL, NONE, FAVORITES].includes(folderId) && !tree.byId.has(folderId)) folderId = ALL;
+    if (!validFilter(folderId, tree)) folderId = ALL;
     panel.dataset.organizing = String(organizing);
     panel.dataset.selecting = String(selectMode);
     const active = currentName();
@@ -596,6 +744,7 @@ function render() {
         else uncategorized++;
         if (favoriteNames.has(item.name)) favoriteCount++;
     }
+    for (const folder of tree.ordered) counts.set(DIRECT + folder.id, counts.get(folder.id));
     for (const folder of [...tree.ordered].reverse()) {
         const parent = tree.parents.get(folder.id);
         if (parent) counts.set(parent, counts.get(parent) + counts.get(folder.id));
@@ -614,7 +763,9 @@ function render() {
             .find((node) => node.dataset.folderId === focusedFolder && node.dataset.action === focusedAction)
             ?.focus({preventScroll: true});
     }
-    panel.querySelector("#prompt-box-folder-name").textContent = tree.paths.get(folderId) || views.find((view) => view.id === folderId)?.name || "전체";
+    panel.querySelector("#prompt-box-folder-name").textContent =
+        folderId.startsWith(DIRECT) ? `${tree.paths.get(filterFolder(folderId))} › 나머지`
+        : tree.paths.get(folderId) || views.find((view) => view.id === folderId)?.name || "전체";
     renderFolderInfo(tree.byId.get(folderId));
     const organize = panel.querySelector("#prompt-box-organize");
     organize.setAttribute("aria-pressed", String(organizing));
@@ -673,11 +824,11 @@ function folderRow(view, tree) {
             toggle.setAttribute("aria-expanded", String(expanded));
             row.append(toggle);
         } else row.append(element("span", "prompt-box-collapse"));
-    }
+    } else if (view.rest) row.append(element("span", "prompt-box-collapse"));
     const item = button("", "folder", "prompt-box-folder");
     item.dataset.folderId = view.id;
     item.setAttribute("aria-current", String(!organizing && view.id === folderId));
-    item.title = tree.paths.get(view.id) || view.name;
+    item.title = view.title || tree.paths.get(view.id) || view.name;
     item.setAttribute("aria-label", organizing && isFolder ? `${item.title} 편집` : item.title);
     if (view.icon) item.append(glyph(view.icon));
     item.append(element("span", "prompt-box-folder-label", view.name));
@@ -700,6 +851,7 @@ function folderNode(folder, tree, counts) {
     const kids = tree.children.get(folder.id);
     if (kids.length && !getState().collapsed.includes(folder.id)) {
         const list = element("div", "prompt-box-children");
+        if (!organizing) list.append(folderRow(restView(folder, tree, counts), tree));
         for (const child of kids) list.append(folderNode(child, tree, counts));
         node.append(list);
     }
@@ -714,7 +866,7 @@ function renderFolders(tree, views, counts) {
         sections.push(fixed);
     }
     const groups = element("div", "prompt-box-groups");
-    const currentRoot = tree.roots.get(folderId);
+    const currentRoot = tree.roots.get(filterFolder(folderId));
     for (const root of tree.children.get("")) {
         const node = folderNode(root, tree, counts);
         node.classList.add("prompt-box-group");
@@ -745,7 +897,7 @@ function chip(view, options = {}) {
 function renderChips(tree, views, counts) {
     const box = panel.querySelector("#prompt-box-chips");
     const previous = new Map(Array.from(box.children, (row) => [row.dataset.key, row.scrollLeft]));
-    const currentRoot = tree.roots.get(folderId);
+    const currentRoot = tree.roots.get(filterFolder(folderId));
     const top = element("div", "prompt-box-chip-row");
     top.dataset.key = "top";
     for (const view of views) top.append(chip(view));
@@ -758,9 +910,16 @@ function renderChips(tree, views, counts) {
         sub.dataset.key = `sub:${currentRoot}`;
         const color = colorOf(tree.byId.get(currentRoot));
         sub.append(chip({id: currentRoot, name: "모두", count: counts.get(currentRoot)}, {color, title: `${tree.paths.get(currentRoot)} 전체`}));
+        const rest = restView(tree.byId.get(currentRoot), tree, counts);
+        sub.append(chip(rest, {color, title: rest.title}));
         for (const folder of tree.ordered) {
             if (folder.id === currentRoot || tree.roots.get(folder.id) !== currentRoot) continue;
-            sub.append(chip({id: folder.id, name: tree.parts.get(folder.id).slice(1).join(" › "), count: counts.get(folder.id)}, {color, title: tree.paths.get(folder.id)}));
+            const name = tree.parts.get(folder.id).slice(1).join(" › ");
+            sub.append(chip({id: folder.id, name, count: counts.get(folder.id)}, {color, title: tree.paths.get(folder.id)}));
+            if (tree.children.get(folder.id).length) {
+                const nested = restView(folder, tree, counts, `${name} › 나머지`);
+                sub.append(chip(nested, {color, title: nested.title}));
+            }
         }
         rows.push(sub);
     }
@@ -884,6 +1043,7 @@ function renderRows(active, favoriteNames, tree) {
                 "prompt-box-empty",
                 searchQuery ? "검색 결과가 없습니다. 다른 폴더나 다른 이름으로 검색해 보세요."
                 : folderId === FAVORITES ? "별을 누르면 자주 쓰는 프리셋을 여기에 모을 수 있습니다."
+                : folderId.startsWith(DIRECT) ? "하위폴더에 넣지 않은 프리셋이 없습니다."
                 : "이 폴더에는 프리셋이 없습니다. 프리셋을 길게 눌러 이 폴더로 옮길 수 있습니다.",
             ),
         );
@@ -1782,7 +1942,6 @@ function handleClick(event) {
             return;
         }
         savePromptSettings();
-        queueNativeSync();
         control.title = added ? "즐겨찾기 해제" : "즐겨찾기 추가";
         control.setAttribute("aria-label", `${name} ${control.title}`);
         control.setAttribute("aria-pressed", String(added));
@@ -1937,6 +2096,7 @@ function handleEscape(event) {
 
 function openPanel() {
     mount();
+    catalogDirty = true;
     if (!panel) createPanel();
     panel.dataset.preparing = "true";
     panel.hidden = false;
@@ -1999,6 +2159,7 @@ function closePanel(restoreFocus = true) {
         historyEntry = false;
         history.back();
     }
+    if (barDirty) renderBar();
     if (restoreFocus && launcher?.isConnected) launcher.focus({preventScroll: true});
 }
 
@@ -2007,16 +2168,22 @@ function mount() {
     if (!select?.parentElement) return false;
     if (presetSelect !== select) {
         presetSelect?.removeEventListener("change", scheduleRender);
-        presetSelect?.removeEventListener("blur", queueNativeSync);
-        selectObserver?.disconnect();
+        presetSelect?.removeEventListener("change", restoreNative, true);
+        presetSelect?.removeEventListener("pointerdown", prepareNative);
+        presetSelect?.removeEventListener("focus", prepareNative);
+        presetSelect?.removeEventListener("blur", restoreNative);
         presetSelect = select;
+        parked = [];
+        nativeFiltered = false;
         catalogDirty = true;
-        selectObserver = new MutationObserver(invalidateCatalog);
-        observePresetSelect();
         select.addEventListener("change", scheduleRender);
-        select.addEventListener("blur", queueNativeSync);
-        queueNativeSync();
+        select.addEventListener("change", restoreNative, true);
+        select.addEventListener("pointerdown", prepareNative);
+        select.addEventListener("focus", prepareNative);
+        select.addEventListener("blur", restoreNative);
     }
+    if (!bar) createBar();
+    if (bar.nextElementSibling !== select.parentElement) select.parentElement.before(bar);
     if (!launcher) {
         launcher = element("div", "menu_button menu_button_icon");
         launcher.title = "프롬 정리함";
@@ -2043,18 +2210,6 @@ function mount() {
     if (saveButton?.parentElement) {
         if (launcher.nextElementSibling !== saveButton) saveButton.before(launcher);
     } else if (launcher.parentElement !== select.parentElement) select.after(launcher);
-    const parent = document.getElementById("openai_api-presets") || select.parentElement;
-    if (observedParent !== parent) {
-        placementObserver?.disconnect();
-        observedParent = parent;
-        placementObserver = new MutationObserver(() => {
-            if (!presetSelect?.isConnected || !launcher?.isConnected) {
-                mount();
-                scheduleRender();
-            }
-        });
-        placementObserver.observe(parent, {childList: true, subtree: true});
-    }
     return true;
 }
 
@@ -2067,6 +2222,7 @@ function initialize() {
         if (type) eventSource.on(type, callback);
     };
     on(event_types.OAI_PRESET_CHANGED_AFTER, () => {
+        catalogDirty = true;
         mount();
         scheduleRender();
     });
@@ -2108,15 +2264,7 @@ function initialize() {
         invalidateCatalog();
         if (changed) saveState();
     });
-    if (!mount()) {
-        bootObserver = new MutationObserver(() => {
-            if (mount()) {
-                bootObserver.disconnect();
-                bootObserver = null;
-            }
-        });
-        bootObserver.observe(document.body, {childList: true, subtree: true});
-    }
+    mount();
 }
 
 if (!globalThis["prompt-box-loaded"]) {
