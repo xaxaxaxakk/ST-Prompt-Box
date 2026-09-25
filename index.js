@@ -51,7 +51,6 @@ let fullRenderPending = false;
 let renderedTree;
 let scrollResetPending = false;
 let searchQuery = "";
-let settingsSnapshot;
 let loading = false;
 let loadingName = "";
 let folderEditId = null;
@@ -160,28 +159,8 @@ function placeSiblings(ids) {
     saveState();
 }
 
-function captureSettings() {
-    const state = getState();
-    return {
-        groups: JSON.stringify([state.folders, state.assignments, state.favorites, state.notes]),
-        view: JSON.stringify([state.collapsed, state.theme]),
-    };
-}
-
 function savePromptSettings() {
-    settingsSnapshot = captureSettings();
     saveSettingsDebounced();
-}
-
-function handleSettingsUpdated() {
-    const previousSelect = presetSelect;
-    mount();
-    const next = captureSettings();
-    const groupsChanged = next.groups !== settingsSnapshot?.groups;
-    const viewChanged = next.view !== settingsSnapshot?.view;
-    settingsSnapshot = next;
-    if (groupsChanged) refreshBar();
-    if (groupsChanged || viewChanged || presetSelect !== previousSelect) scheduleRender();
 }
 
 function saveState() {
@@ -2216,7 +2195,6 @@ function mount() {
 function initialize() {
     if (initialized) return;
     initialized = true;
-    settingsSnapshot = captureSettings();
     preloadFont();
     const on = (type, callback) => {
         if (type) eventSource.on(type, callback);
@@ -2230,7 +2208,6 @@ function initialize() {
         mount();
         preloadFont();
     });
-    on(event_types.SETTINGS_UPDATED, handleSettingsUpdated);
     on(event_types.PRESET_RENAMED, ({apiId, oldName, newName}) => {
         if (apiId !== "openai") return;
         const state = getState();
